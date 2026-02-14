@@ -1,0 +1,179 @@
+{
+  "school": {
+    "name": "Victory College School",
+    "latitude": 29.964406,
+    "longitude": 31.270319,
+    "address": "Cairo, Egypt"
+  },
+  "buses": [
+    {
+      "id": "BUS_001",
+      "type": "Small",
+      "capacity": 20,
+      "fixed_cost": 50.0,
+      "var_cost_km": 5.0
+    },
+    {
+      "id": "BUS_002",
+      "type": "Large",
+      "capacity": 45,
+      "fixed_cost": 80.0,
+      "var_cost_km": 7.0
+    }
+  ],
+  "permanent_students": [
+    {
+      "id": "S001",
+      "latitude": 29.96,
+      "longitude": 31.28,
+      "age": 10,
+      "school_stage": "ELEMENTARY",
+      "fee": 100.0
+    },
+    {
+      "id": "S002",
+      "latitude": 29.97,
+      "longitude": 31.29,
+      "age": 12,
+      "school_stage": "MIDDLE",
+      "fee": 120.0
+    },
+    {
+      "id": "S003",
+      "latitude": 29.98,
+      "longitude": 31.27,
+      "age": 15,
+      "school_stage": "HIGH",
+      "fee": 150.0
+    },
+    {
+      "id": "S004",
+      "latitude": 29.955,
+      "longitude": 31.275,
+      "age": 11,
+      "school_stage": "ELEMENTARY",
+      "fee": 100.0
+    },
+    {
+      "id": "S005",
+      "latitude": 29.965,
+      "longitude": 31.285,
+      "age": 13,
+      "school_stage": "MIDDLE",
+      "fee": 120.0
+    }
+  ],
+  "routes": [
+    {
+      "id": "R001",
+      "bus_id": "BUS_001",
+      "route_tmax": 60,
+      "initial_stops": [
+        {
+          "latitude": 29.964406,
+          "longitude": 31.270319,
+          "description": "School (Start)"
+        },
+        {
+          "latitude": 29.960,
+          "longitude": 31.270,
+          "description": "Downtown Station"
+        },
+        {
+          "latitude": 29.970,
+          "longitude": 31.280,
+          "description": "Central Park"
+        },
+        {
+          "latitude": 29.975,
+          "longitude": 31.290,
+          "description": "North District"
+        },
+        {
+          "latitude": 29.964406,
+          "longitude": 31.270319,
+          "description": "School (End)"
+        }
+      ]
+    },
+    {
+      "id": "R002",
+      "bus_id": "BUS_002",
+      "route_tmax": 75,
+      "initial_stops": [
+        {
+          "latitude": 29.964406,
+          "longitude": 31.270319,
+          "description": "School (Start)"
+        },
+        {
+          "latitude": 29.950,
+          "longitude": 31.260,
+          "description": "South Terminal"
+        },
+        {
+          "latitude": 29.965,
+          "longitude": 31.275,
+          "description": "University Area"
+        },
+        {
+          "latitude": 29.980,
+          "longitude": 31.295,
+          "description": "Industrial Zone"
+        },
+        {
+          "latitude": 29.964406,
+          "longitude": 31.270319,
+          "description": "School (End)"
+        }
+      ]
+    }
+  ],
+  "temporary_detour_requests": [
+    {
+      "student_id": "S001",
+      "request_type": "temporary",
+      "new_location": {
+        "latitude": 29.962,
+        "longitude": 31.272,
+        "reason": "Visiting grandparent"
+      },
+      "valid_until": "2026-02-13T17:00:00",
+      "comment": "One-time detour for the day"
+    },
+    {
+      "student_id": "S002",
+      "request_type": "temporary",
+      "new_location": {
+        "latitude": 29.958,
+        "longitude": 31.265,
+        "reason": "After-school tutoring"
+      },
+      "valid_until": "2026-02-13T18:00:00",
+      "comment": "Drop-off changed for today only"
+    },
+    {
+      "student_id": "S004",
+      "request_type": "temporary",
+      "new_location": {
+        "latitude": 29.970,
+        "longitude": 31.285,
+        "reason": "Sports practice"
+      },
+      "valid_until": "2026-02-13T19:00:00",
+      "comment": "Extended stay for training"
+    }
+  ],
+  "algorithm_config": {
+    "daily_detour_budget_minutes": 5,
+    "safe_walking_distance_buffer_meters": 200,
+    "prefer_residential_roads": true,
+    "avoid_arterial_student_crossing": true,
+    "cairo_factor": {
+      "arterial_speed_multiplier": 0.4,
+      "residential_speed_multiplier": 0.7,
+      "peak_hour_congestion": true
+    }
+  },
+  "notes": "This data file contains all necessary inputs to run the Safety-Aware Bus Optimization algorithm. The algorithm will: 1) Assign permanent students to routes using Cheapest Insertion, 2) Evaluate temporary detour requests within the daily 5-minute budget, 3) Ensure all student walking paths avoid arterial road crossings."
+}

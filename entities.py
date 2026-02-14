@@ -1,0 +1,167 @@
+from enum import Enum
+
+class School_Stage(Enum):
+    KG = 1
+    ELEMENTARY = 2
+    MIDDLE = 3
+    HIGH = 4
+
+def calc_max_walk_distance(school_stage):
+    match school_stage:
+        case School_Stage.KG:
+            return 0
+        case School_Stage.ELEMENTARY:
+            return 0
+        case School_Stage.MIDDLE:
+            return 100
+        case School_Stage.HIGH:
+            return 200
+
+
+class Student:  
+    def __init__(self, id, lat, lon, age, school_stage, fee):
+        self.id = id
+        self.coords = (lat, lon)
+        self.age = age
+        self.school_stage = school_stage
+        self.fee = fee
+        self.walk_radius = calc_max_walk_distance(school_stage)
+        self.assigned_stop = None
+        self.is_served = False
+
+        
+
+class Bus:
+    def __init__(self, bus_type, capacity, fixed_cost, var_cost_km):
+        self.bus_type = bus_type
+        self.capacity = capacity
+        self.fixed_cost = fixed_cost
+        self.var_cost_km = var_cost_km
+
+
+class Stop:
+    """Represents a pickup/dropoff location on a route.
+    
+    A stop is a location (snapped to the road network) where one or more
+    students can be picked up or dropped off. Each stop tracks which students
+    are assigned to it and ensures they can reach it within their walk radius.
+    """
+    def __init__(self, node_id, lat, lon, stop_id=None):
+        """Initialize a Stop.
+        
+        Args:
+            node_id: The OSM node ID from the road network
+            lat: Latitude coordinate
+            lon: Longitude coordinate
+            stop_id: Optional unique identifier for the stop
+        """
+        self.node_id = node_id
+        self.coords = (lat, lon)  # (lat, lon) tuple
+        self.students = []
+        self.stop_id = stop_id
+        
+    def add_student(self, student):
+        """Add a student to this stop.
+        
+        Args:
+            student: Student object
+        """
+        if student not in self.students:
+            self.students.append(student)
+            student.assigned_stop = self
+            student.is_served = True
+            
+    def remove_student(self, student):
+        """Remove a student from this stop.
+        
+        Args:
+            student: Student object
+        """
+        if student in self.students:
+            self.students.remove(student)
+            if not self.students:  # If no students left
+                student.is_served = False
+                
+    def is_full(self, bus_capacity):
+        """Check if this stop has reached capacity.
+        
+        Args:
+            bus_capacity: The bus capacity
+            
+        Returns:
+            bool: True if number of students equals bus capacity
+        """
+        return len(self.students) >= bus_capacity
+    
+    def get_student_count(self):
+        """Get number of students at this stop."""
+        return len(self.students)
+    
+    def __repr__(self):
+        return f"Stop(node={self.node_id}, students={len(self.students)})"
+
+
+class Route:
+    """Represents a bus route with ordered pickup/dropoff stops.
+    
+    A route consists of a bus, a sequence of stops, and associated metrics
+    like distance, time, and cost. The route tracks temporary detour time
+    used during the day.
+    """
+    def __init__(self, bus, route_id=None, route_tmax=60):
+        """Initialize a Route.
+        
+        Args:
+            bus: Bus object assigned to this route
+            route_id: Optional unique identifier for the route
+            route_tmax: Maximum acceptable total trip time in minutes (default 60)
+        """
+        self.bus = bus
+        self.stops = [] # List of Stop objects in order
+        self.total_distance = 0
+        self.total_time = 0  # Total travel time in minutes
+        self.route_id = route_id
+        self.route_tmax = route_tmax
+        self.detour_time_used = 0  # Track temporary detour time used today
+        
+    def get_revenue(self):
+        """Calculate total revenue from all students on this route."""
+        return sum(student.fee for stop in self.stops for student in stop.students)
+
+    def get_total_cost(self):
+        """Calculate total cost: fixed + variable (distance-based)."""
+        return self.bus.fixed_cost + (self.total_distance * self.bus.var_cost_km)
+
+    def get_profit_margin(self):
+        """Calculate profit margin as (revenue - cost) / revenue."""
+        revenue = self.get_revenue()
+        if revenue == 0: 
+            return 0
+        return (revenue - self.get_total_cost()) / revenue
+    
+    def get_current_detour_time(self):
+        """Get cumulative temporary detour time used today in minutes."""
+        return self.detour_time_used
+    
+    def add_detour_time(self, time_minutes):
+        """Add time to the detour counter (for temporary requests).
+        
+        Args:
+            time_minutes: Time in minutes to add
+        """
+        self.detour_time_used += time_minutes
+    
+    def reset_daily_detour_time(self):
+        """Reset the daily detour time counter (call at start of new day)."""
+        self.detour_time_used = 0
+    
+    def get_student_count(self):
+        """Get total number of students on this route."""
+        return sum(stop.get_student_count() for stop in self.stops)
+    
+    def is_at_capacity(self):
+        """Check if any stop on the route is at or over bus capacity."""
+        return any(stop.is_full(self.bus.capacity) for stop in self.stops)
+    
+    def __repr__(self):
+        return f"Route(id={self.route_id}, stops={len(self.stops)}, students={self.get_student_count()})"

@@ -17,11 +17,11 @@ from visualization import create_route_map
 # SETUP: Download graph and load input data
 # ============================================================================
 
-print("Downloading Cairo road network...")
+print("Downloading road network...")
 G = ox.graph_from_bbox([31.229084, 29.925630, 31.331909, 29.991682], network_type='drive')
 
 # Apply safety/speed tags (Cairo Factor)
-print("Applying Cairo Factor safety tags...")
+print("Applying safety tags...")
 for u, v, k, data in G.edges(keys=True, data=True):
     maxspeed = data.get('maxspeed', 30)
     if isinstance(maxspeed, list):

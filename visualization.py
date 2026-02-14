@@ -12,6 +12,7 @@ import folium
 from folium import plugins
 import networkx as nx
 import osmnx as ox
+import math
 
 
 def create_route_map(G, routes, students_to_routes=None, school_coords=None, output_file='route_map.html'):
@@ -27,9 +28,6 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         Folium Map object
     """
     
-
-    print(routes)
-
     # Calculate map center
     lats = [G.nodes[node]['y'] for node in G.nodes()]
     lons = [G.nodes[node]['x'] for node in G.nodes()]
@@ -54,21 +52,6 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
             popup="<b>SCHOOL</b>",
             tooltip="School Location",
             icon=folium.Icon(color='darkgreen', icon='graduation-cap', prefix='fa')
-        ).add_to(m)
-    
-    # Add road network edges (light background)
-    for u, v, k, data in G.edges(keys=True, data=True):
-        points = [(G.nodes[u]['y'], G.nodes[u]['x']), (G.nodes[v]['y'], G.nodes[v]['x'])]
-        
-        # Color based on safety - very faint
-        color = 'red' if not data.get('is_safe_to_cross', True) else 'blue'
-        
-        folium.PolyLine(
-            points,
-            color=color,
-            weight=1,
-            opacity=0.15,
-            popup=f"Speed: {data.get('speed_kph', 0):.1f} kph"
         ).add_to(m)
     
     # Track all students and their stops for visualization
@@ -103,20 +86,32 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                         weight='length'
                     )
                     
-                    # Convert node IDs to coordinates
+                    # Convert node IDs to coordinates and add a small offset based on route index
+                    # This helps to see overlapping routes side-by-side
+                    coord_offset = 0.00003 * (route_idx - 0.5)  # Offset by approx 3-5 meters
                     path_coords = [
-                        (G.nodes[node]['y'], G.nodes[node]['x']) 
+                        (G.nodes[node]['y'] + coord_offset, G.nodes[node]['x'] + coord_offset) 
                         for node in shortest_path_nodes
                     ]
                     
                     # Draw the actual path on the map
-                    folium.PolyLine(
+                    path_line = folium.PolyLine(
                         path_coords,
                         color=route_color,
-                        weight=4,
+                        weight=5,
                         opacity=0.8,
                         popup=f"Route {route.route_id}: {from_stop.node_id} → {to_stop.node_id}",
-                        dash_array='5, 5'  # Dashed line
+                        dash_array='1, 0'  # Solid line for better visibility of overlaps
+                    ).add_to(m)
+                    
+                    # Add directional arrows using PolyLineTextPath
+                    # Since lines are already offset by coord_offset, we keep arrows centered on them
+                    folium.plugins.PolyLineTextPath(
+                        path_line,
+                        '          \u27A4          ',
+                        repeat=True,
+                        offset=6,  # Small offset to center text on line
+                        attributes={'fill': route_color, 'font-weight': 'bold', 'font-size': '18px'}
                     ).add_to(m)
                     
                 except nx.NetworkXNoPath:
@@ -291,10 +286,8 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         <p style="margin: 5px 0;">
             <span style="border-bottom: 4px solid red;">━━</span> Bus Route (follows streets)
         </p>
-        <hr style="margin: 5px 0;">
-        <p style="margin: 5px 0; font-size: 12px;">
-            <span style="color: blue;">━</span> Residential (Safe)<br>
-            <span style="color: red;">━</span> Arterial (Unsafe crossing)
+        <p style="margin: 5px 0;">
+            <span style="color: red; font-size: 16px;">➤</span> Direction of Travel
         </p>
     </div>
     '''

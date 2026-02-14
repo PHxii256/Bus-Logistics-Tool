@@ -264,10 +264,25 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                     opacity=0.2
                 ).add_to(m)
     
-    # Add legend
-    legend_html = '''
+    # Add legend and statistics
+    stats_html = ""
+    for route_idx, route in enumerate(routes):
+        route_color = route_colors[route_idx % len(route_colors)]
+        student_count = sum(len(stop.students) for stop in route.stops)
+        stats_html += f"""
+        <div style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 5px;">
+            <p style="margin: 0; font-weight: bold; color: {route_color};">Route {route.route_id}</p>
+            <p style="margin: 0; font-size: 12px;">
+                Stops: {len(route.stops)} | Students: {student_count}<br>
+                Distance: {route.total_distance:.2f} km<br>
+                Time: {route.total_time:.1f} min
+            </p>
+        </div>
+        """
+
+    legend_html = f'''
     <div style="position: fixed; 
-                bottom: 50px; right: 50px; width: 320px; height: auto; 
+                bottom: 20px; right: 20px; width: 320px; height: auto; 
                 background-color: white; border:2px solid grey; z-index:9999; 
                 font-size:14px; padding: 10px; border-radius: 5px;">
         <p style="margin: 0; font-weight: bold;">Map Legend</p>
@@ -280,15 +295,8 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         <p style="margin: 5px 0;">
             <span style="color: red;">●</span> Bus Stop / Boarding Point
         </p>
-        <p style="margin: 5px 0;">
-            <span style="border-bottom: 2px dashed red;">━━</span> Walking Path to Stop
-        </p>
-        <p style="margin: 5px 0;">
-            <span style="border-bottom: 4px solid red;">━━</span> Bus Route (follows streets)
-        </p>
-        <p style="margin: 5px 0;">
-            <span style="color: red; font-size: 16px;">➤</span> Direction of Travel
-        </p>
+        <p style="margin: 10px 0 5px 0; font-weight: bold;">Route Statistics</p>
+        {stats_html}
     </div>
     '''
     m.get_root().html.add_child(folium.Element(legend_html))

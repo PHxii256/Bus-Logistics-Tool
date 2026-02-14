@@ -13,6 +13,20 @@ from folium import plugins
 import networkx as nx
 import osmnx as ox
 import math
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+from detour_engine import calculate_student_ride_time
+
+
+def get_address_from_coords(lat, lon):
+    """Reverse geocode coordinates to an address string."""
+    try:
+        geolocator = Nominatim(user_agent="bus_logistics_tool")
+        location = geolocator.reverse((lat, lon), language='en')
+        return location.address if location else "Address not found"
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+        return "Address lookup error"
 
 
 def create_route_map(G, routes, students_to_routes=None, school_coords=None, output_file='route_map.html'):
@@ -100,7 +114,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                         color=route_color,
                         weight=5,
                         opacity=0.8,
-                        popup=f"Route {route.route_id}: {from_stop.node_id} → {to_stop.node_id}",
+                        popup=folium.Popup(f"Route {route.route_id}: {from_stop.node_id} → {to_stop.node_id}", max_width=200),
                         dash_array='1, 0'  # Solid line for better visibility of overlaps
                     ).add_to(m)
                     
@@ -129,6 +143,18 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         # Add stop markers
         for stop_idx, stop in enumerate(route.stops):
             student_count = len(stop.students)
+            stop_type = "Temporary" if stop.is_temporary else "Permanent"
+            
+            # Create student list for popup
+            student_list_html = ""
+            if stop.students:
+                student_list_html = f"<br><b>Stop Type:</b> {stop_type}"
+                student_list_html += "<br><b>Students:</b><ul style='margin: 0; padding-left: 15px;'>"
+                for s in stop.students:
+                    student_list_html += f"<li>{s.id} ({s.school_stage.name})</li>"
+                student_list_html += "</ul>"
+            else:
+                student_list_html = f"<br><b>Stop Type:</b> {stop_type}"
             
             # Check if this is a school stop (start or end)
             is_school_start = (stop_idx == 0)
@@ -151,7 +177,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 folium.CircleMarker(
                     location=(stop.coords[0], stop.coords[1]),
                     radius=12,
-                    popup=f"<b>{label}: {route.route_id}</b><br>Students: {student_count}<br>Node: {stop.node_id}",
+                    popup=folium.Popup(f"<b>{label}: {route.route_id}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}<br>Node: {stop.node_id}{student_list_html}", max_width=400),
                     tooltip=f"{route.route_id} {label}",
                     color='darkgreen',
                     fill=True,
@@ -163,7 +189,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 # Add a label showing student count at school stop
                 folium.Marker(
                     location=(stop.coords[0], stop.coords[1]),
-                    popup=f"<b>{route.route_id}: SCHOOL</b><br>{student_count} students",
+                    popup=folium.Popup(f"<b>{route.route_id}: SCHOOL</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>{student_count} students{student_list_html}", max_width=400),
                     icon=folium.Icon(
                         color='green',
                         icon_color='white',
@@ -176,7 +202,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 folium.CircleMarker(
                     location=(stop.coords[0], stop.coords[1]),
                     radius=8,
-                    popup=f"<b>Stop: {route.route_id}-{stop_idx}</b><br>Students: {student_count}<br>Node: {stop.node_id}",
+                    popup=folium.Popup(f"<b>Stop: {route.route_id}-{stop_idx}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}<br>Node: {stop.node_id}{student_list_html}", max_width=400),
                     tooltip=f"{route.route_id} Stop {stop_idx} ({student_count} students)",
                     color=route_color,
                     fill=True,
@@ -187,31 +213,67 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
             
             # Record students at this stop
             for student in stop.students:
-                student_stop_map[student.id] = (stop, route_color)
+                student_stop_map[student.id] = (stop, route, route_color)
     
     # Add student home locations and walking paths to stops
-    for student_id, (stop, route_color) in student_stop_map.items():
+    for student_id, (stop, route, route_color) in student_stop_map.items():
         # Find the student object to get home coordinates
         student_obj = None
-        for route in routes:
-            for stop_check in route.stops:
-                for stud in stop_check.students:
-                    if stud.id == student_id:
-                        student_obj = stud
-                        break
+        for stop_check in route.stops:
+            for stud in stop_check.students:
+                if stud.id == student_id:
+                    student_obj = stud
+                    break
         
         if student_obj:
-            # Marker for student home
-            folium.Circle(
+            # Get address from Nominatim
+            print(f"Geocoding address for student {student_obj.id}...")
+            address_name = get_address_from_coords(student_obj.coords[0], student_obj.coords[1])
+            
+            # Calculate Individual Ride Time (from assigned stop to school along route)
+            ride_time = 0
+            stop_idx = -1
+            for i, s in enumerate(route.stops):
+                if s == stop:
+                    stop_idx = i
+                    break
+            
+            if stop_idx != -1:
+                for i in range(stop_idx, len(route.stops) - 1):
+                    try:
+                        ride_time += nx.shortest_path_length(G, route.stops[i].node_id, route.stops[i+1].node_id, weight='travel_time')
+                    except:
+                        continue
+            
+            # Calculate Direct Ride Time (from student home node to school)
+            direct_time = "N/A"
+            try:
+                student_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
+                school_node = route.stops[-1].node_id
+                direct_time = nx.shortest_path_length(G, student_node, school_node, weight='travel_time')
+                direct_time = f"{direct_time:.1f} min"
+            except:
+                pass
+
+            # Marker for student home (Point/Marker instead of Circle)
+            folium.Marker(
                 location=student_obj.coords,
-                radius=20,
-                popup=f"<b>Student: {student_obj.id}</b><br>Stage: {student_obj.school_stage.name}<br>Walk distance: {student_obj.walk_radius}m",
+                popup=folium.Popup(f"""
+                <div style="width: 400px;">
+                    <b>Student: {student_obj.id}</b><br>
+                    Stage: {student_obj.school_stage.name}<br>
+                    Address: {address_name}<br>
+                    <div style="margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">
+                        <b>Routing Details:</b><br>
+                        Assigned Route: {route.route_id}<br>
+                        Assigned Ride: {ride_time:.1f} min<br>
+                        Direct Potential: {direct_time}<br>
+                        Walk to Stop: {student_obj.walk_radius}m
+                    </div>
+                </div>
+                """, max_width=450),
                 tooltip=f"Home: {student_obj.id}",
-                color='lightblue',
-                fill=True,
-                fillColor='lightblue',
-                fillOpacity=0.6,
-                weight=2
+                icon=folium.Icon(color='blue', icon='home', prefix='fa')
             ).add_to(m)
             
             # Try to find nearest nodes to student home and stop for walking path
@@ -238,7 +300,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                         color=route_color,
                         weight=2,
                         opacity=0.4,
-                        popup=f"{student_obj.id} walks to {route_color} {stop.node_id}",
+                        popup=folium.Popup(f"{student_obj.id} walks to {route_color} {stop.node_id}", max_width=300),
                         dash_array='2, 2',
                         dash_offset='5'
                     ).add_to(m)
@@ -251,7 +313,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                         color=route_color,
                         weight=2,
                         opacity=0.2,
-                        popup=f"{student_obj.id} no path to stop"
+                        popup=folium.Popup(f"{student_obj.id} no path to stop", max_width=300)
                     ).add_to(m)
                     
             except Exception as e:
@@ -269,13 +331,17 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
     for route_idx, route in enumerate(routes):
         route_color = route_colors[route_idx % len(route_colors)]
         student_count = sum(len(stop.students) for stop in route.stops)
+        
+        # Calculate student ride time (1st pickup to school)
+        ride_time = calculate_student_ride_time(route, G)
+        
         stats_html += f"""
         <div style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 5px;">
             <p style="margin: 0; font-weight: bold; color: {route_color};">Route {route.route_id}</p>
             <p style="margin: 0; font-size: 12px;">
-                Stops: {len(route.stops)} | Students: {student_count}<br>
+                Stops: {len(route.stops) - 2} | Students: {student_count}<br>
                 Distance: {route.total_distance:.2f} km<br>
-                Time: {route.total_time:.1f} min
+                Ride Time: {ride_time:.1f} / {route.route_tmax} min (Total: {route.total_time:.1f})
             </p>
         </div>
         """

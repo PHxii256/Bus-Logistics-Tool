@@ -216,6 +216,95 @@ def calculate_route_time(route, graph):
     return total_time_minutes
 
 
+def calculate_student_ride_time(route, graph):
+    """Calculate the travel time from the first student boarding to the end (school).
+    
+    The student ride time is the path duration from the first stop that has 
+    students assigned to it, until the final stop (the school).
+    
+    Args:
+        route: Route object with ordered stops
+        graph: NetworkX road network
+        
+    Returns:
+        float: Student ride time in minutes
+    """
+    if len(route.stops) < 2:
+        return 0.0
+    
+    # Find the index of the first stop that has students
+    first_student_stop_idx = -1
+    for i, stop in enumerate(route.stops):
+        # Even if it's the school (stop len-1), if students are there it counts? 
+        # Usually school is the dropoff, so pickups happen at 0 to len-2.
+        if stop.get_student_count() > 0:
+            first_student_stop_idx = i
+            break
+            
+    if first_student_stop_idx == -1:
+        return 0.0
+        
+    # If the first student is also at the last stop (school), ride time is 0
+    if first_student_stop_idx >= len(route.stops) - 1:
+        return 0.0
+        
+    ride_time = 0.0
+    for i in range(first_student_stop_idx, len(route.stops) - 1):
+        from_node = route.stops[i].node_id
+        to_node = route.stops[i + 1].node_id
+        
+        try:
+            time_minutes = nx.shortest_path_length(
+                graph, from_node, to_node, weight='travel_time'
+            )
+            ride_time += time_minutes
+        except nx.NetworkXNoPath:
+            continue
+            
+    return ride_time
+
+
+def calculate_student_ride_time_potential(route, new_stop, insert_position, graph):
+    """Calculate what the student ride time WOULD be if a stop were inserted.
+    
+    Args:
+        route: Route object
+        new_stop: Stop object to potentially insert
+        insert_position: Index where new_stop would be placed
+        graph: NetworkX graph
+        
+    Returns:
+        float: Predicted student ride time in minutes
+    """
+    # Create temporary stop list
+    temp_stops = list(route.stops)
+    temp_stops.insert(insert_position, new_stop)
+    
+    # This function is used during search, so we assume the 'new_stop' WILL have a student.
+    # So the first student stop is either the current first or the new stop.
+    
+    first_idx = -1
+    for i, stop in enumerate(temp_stops):
+        # If it's the new stop, it definitely has a student (the one we are trying to add)
+        # If it's an existing stop, check its count
+        if stop == new_stop or stop.get_student_count() > 0:
+            first_idx = i
+            break
+            
+    if first_idx == -1 or first_idx >= len(temp_stops) - 1:
+        return 0.0
+        
+    ride_time = 0.0
+    for i in range(first_idx, len(temp_stops) - 1):
+        try:
+            ride_time += nx.shortest_path_length(
+                graph, temp_stops[i].node_id, temp_stops[i+1].node_id, weight='travel_time'
+            )
+        except:
+            continue
+    return ride_time
+
+
 def is_route_safe(route, graph, walk_distance_limits):
     """Check if all students on the route can reach their stops safely.
     
@@ -372,31 +461,35 @@ def validate_temporary_detour(new_stop, route, delta_time_minutes, daily_budget=
     return True, remaining, f"Temporary detour accepted ({total_if_added:.2f}/{daily_budget} min used)"
 
 
-def validate_permanent_student(new_stop, route, delta_time_minutes, graph):
+def validate_permanent_student(new_stop, route, insert_position, delta_time_minutes, graph):
     """Validate if a permanent student can be added to the route.
     
     A permanent student assignment is accepted if it doesn't cause the
-    route to exceed its maximum time (route_tmax) and bus capacity is available.
+    longest student ride time (from first pickup to school) to exceed route_tmax,
+    and bus capacity is available.
     
     Args:
         new_stop: Stop object for the new student
         route: Existing Route object
-        delta_time_minutes: Time cost of this insertion (from calculate_insertion_cost)
+        insert_position: Where the stop is being inserted
+        delta_time_minutes: Time cost of this insertion (for info)
         graph: NetworkX road network
         
     Returns:
-        Tuple of (valid: bool, new_total_time: float, reason: str)
+        Tuple of (valid: bool, student_ride_time: float, reason: str)
     """
     # Check 1: Bus capacity
     if route.get_student_count() >= route.bus.capacity:
         return False, route.total_time, f"Bus at capacity ({route.get_student_count()}/{route.bus.capacity})"
     
-    # Check 2: Route time limit
-    new_total_time = route.total_time + delta_time_minutes
-    if new_total_time > route.route_tmax:
-        return False, new_total_time, f"Route time exceeds Tmax: {new_total_time:.1f} > {route.route_tmax} min"
+    # Check 2: Student ride time limit (Tmax)
+    # The requirement is that the first student boarded doesn't spend more than Tmax
+    new_student_ride_time = calculate_student_ride_time_potential(route, new_stop, insert_position, graph)
     
-    return True, new_total_time, "Permanent student accepted"
+    if new_student_ride_time > route.route_tmax:
+        return False, new_student_ride_time, f"Student ride time exceeds Tmax: {new_student_ride_time:.1f} > {route.route_tmax} min"
+    
+    return True, new_student_ride_time, "Permanent student accepted"
 
 
 # ============================================================================
@@ -491,8 +584,8 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
                 if not valid:
                     continue
             else:  # permanent
-                valid, new_time, constraint_reason = validate_permanent_student(
-                    new_stop, route, delta_time, graph
+                valid, new_ride_time, constraint_reason = validate_permanent_student(
+                    new_stop, route, position, delta_time, graph
                 )
                 if not valid:
                     continue
@@ -563,6 +656,11 @@ def process_detour_request(student, existing_routes, graph, detour_type='tempora
     # Update route
     if result['is_new_stop']:
         route.stops.insert(position, new_stop)
+        new_stop.is_temporary = (detour_type == 'temporary')
+    
+    # If the request is permanent, the stop must be permanent even if it existed before
+    if detour_type == 'permanent':
+        new_stop.is_temporary = False
     
     new_stop.add_student(student)
     

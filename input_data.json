@@ -7,14 +7,14 @@
   },
   "buses": [
     {
-      "id": "BUS_001",
+      "id": "BUS_1",
       "type": "Small",
       "capacity": 20,
       "fixed_cost": 50.0,
       "var_cost_km": 5.0
     },
     {
-      "id": "BUS_002",
+      "id": "BUS_2",
       "type": "Large",
       "capacity": 45,
       "fixed_cost": 80.0,
@@ -23,15 +23,15 @@
   ],
   "permanent_students": [
     {
-      "id": "S001",
-      "latitude": 29.96,
-      "longitude": 31.28,
+      "id": "S1",
+      "latitude": 29.958506,
+      "longitude": 31.276834,
       "age": 10,
       "school_stage": "ELEMENTARY",
       "fee": 100.0
     },
     {
-      "id": "S002",
+      "id": "S2",
       "latitude": 29.97,
       "longitude": 31.29,
       "age": 12,
@@ -39,7 +39,7 @@
       "fee": 120.0
     },
     {
-      "id": "S003",
+      "id": "S3",
       "latitude": 29.98,
       "longitude": 31.27,
       "age": 15,
@@ -47,7 +47,7 @@
       "fee": 150.0
     },
     {
-      "id": "S004",
+      "id": "S4",
       "latitude": 29.955,
       "longitude": 31.275,
       "age": 11,
@@ -55,39 +55,33 @@
       "fee": 100.0
     },
     {
-      "id": "S005",
+      "id": "S5",
       "latitude": 29.965,
       "longitude": 31.285,
       "age": 13,
       "school_stage": "MIDDLE",
       "fee": 120.0
+    },
+    {
+      "id": "S6",
+      "latitude": 29.960161,
+      "longitude": 31.269820,
+      "age": 10,
+      "school_stage": "ELEMENTARY",
+      "fee": 100.0
     }
   ],
   "routes": [
     {
-      "id": "R001",
-      "bus_id": "BUS_001",
-      "route_tmax": 60,
+      "id": "R1",
+      "bus_id": "BUS_1",
+      "route_tmax": 30,
+      "note": "if route_tmax is set to < 37.9 here the system will output 2 routes", 
       "initial_stops": [
         {
           "latitude": 29.964406,
           "longitude": 31.270319,
           "description": "School (Start)"
-        },
-        {
-          "latitude": 29.960,
-          "longitude": 31.270,
-          "description": "Downtown Station"
-        },
-        {
-          "latitude": 29.970,
-          "longitude": 31.280,
-          "description": "Central Park"
-        },
-        {
-          "latitude": 29.975,
-          "longitude": 31.290,
-          "description": "North District"
         },
         {
           "latitude": 29.964406,
@@ -97,30 +91,17 @@
       ]
     },
     {
-      "id": "R002",
-      "bus_id": "BUS_002",
+      "id": "R2",
+      "bus_id": "BUS_2",
       "route_tmax": 75,
+      "note": "if route_tmax is set to 60 here the system will output only 1 route", 
       "initial_stops": [
         {
           "latitude": 29.964406,
           "longitude": 31.270319,
           "description": "School (Start)"
         },
-        {
-          "latitude": 29.950,
-          "longitude": 31.260,
-          "description": "South Terminal"
-        },
-        {
-          "latitude": 29.965,
-          "longitude": 31.275,
-          "description": "University Area"
-        },
-        {
-          "latitude": 29.980,
-          "longitude": 31.295,
-          "description": "Industrial Zone"
-        },
+
         {
           "latitude": 29.964406,
           "longitude": 31.270319,
@@ -131,7 +112,7 @@
   ],
   "temporary_detour_requests": [
     {
-      "student_id": "S001",
+      "student_id": "S1",
       "request_type": "temporary",
       "new_location": {
         "latitude": 29.962,
@@ -142,7 +123,7 @@
       "comment": "One-time detour for the day"
     },
     {
-      "student_id": "S002",
+      "student_id": "S2",
       "request_type": "temporary",
       "new_location": {
         "latitude": 29.958,
@@ -153,7 +134,7 @@
       "comment": "Drop-off changed for today only"
     },
     {
-      "student_id": "S004",
+      "student_id": "S4",
       "request_type": "temporary",
       "new_location": {
         "latitude": 29.970,

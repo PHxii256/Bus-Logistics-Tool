@@ -59,6 +59,7 @@ class Stop:
         self.coords = (lat, lon)  # (lat, lon) tuple
         self.students = []
         self.stop_id = stop_id
+        self.is_temporary = False
         
     def add_student(self, student):
         """Add a student to this stop.

@@ -16,14 +16,14 @@
   },
   "buses": [
     {
-      "id": "BUS_001",
+      "id": "BUS_1",
       "type": "Small",
       "capacity": 20,
       "fixed_cost": 50.0,
       "variable_cost_per_km": 5.0
     },
     {
-      "id": "BUS_002",
+      "id": "BUS_2",
       "type": "Large",
       "capacity": 45,
       "fixed_cost": 80.0,
@@ -32,12 +32,12 @@
   ],
   "permanent_routes": [
     {
-      "route_id": "R001",
+      "route_id": "R1",
       "bus_type": "Small",
-      "max_trip_time_minutes": 60,
+      "max_trip_time_minutes": 30,
       "stops": [
         {
-          "stop_id": "R001-Stop-0",
+          "stop_id": "R1-Stop-0",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -45,131 +45,57 @@
           "student_ids": []
         },
         {
-          "stop_id": "R001-Stop-1",
-          "latitude": 29.9596998,
-          "longitude": 31.2698744,
-          "node_id": 6589371949,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R001-Stop-2",
+          "stop_id": "R1-Stop-1",
           "latitude": 29.9798738,
           "longitude": 31.2700807,
           "node_id": 6304086265,
           "student_count": 1,
           "student_ids": [
-            "S003"
+            "S3"
           ]
         },
         {
-          "stop_id": "R001-Stop-3",
-          "latitude": 29.9704512,
-          "longitude": 31.2795165,
-          "node_id": 317867968,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R001-Stop-4",
-          "latitude": 29.9750781,
-          "longitude": 31.290185,
-          "node_id": 4325399131,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R001-Stop-5",
-          "latitude": 29.9651139,
-          "longitude": 31.285523599999998,
-          "node_id": 6594701704,
-          "student_count": 1,
-          "student_ids": [
-            "S005"
-          ]
-        },
-        {
-          "stop_id": "R001-Stop-6",
-          "latitude": 29.9644413,
-          "longitude": 31.270124,
-          "node_id": 2208869932,
-          "student_count": 0,
-          "student_ids": []
-        }
-      ],
-      "total_distance_km": 14.509994294186107,
-      "total_time_minutes": 45.73180884853363,
-      "profit_margin": 0.5461112167743314
-    },
-    {
-      "route_id": "R002",
-      "bus_type": "Large",
-      "max_trip_time_minutes": 75,
-      "stops": [
-        {
-          "stop_id": "R002-Stop-0",
-          "latitude": 29.9644413,
-          "longitude": 31.270124,
-          "node_id": 2208869932,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R002-Stop-1",
-          "latitude": 29.9507298,
-          "longitude": 31.2612336,
-          "node_id": 6655318099,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R002-Stop-2",
-          "latitude": 29.9550634,
-          "longitude": 31.27443015,
-          "node_id": 6586427482,
-          "student_count": 1,
-          "student_ids": [
-            "S004"
-          ]
-        },
-        {
-          "stop_id": "R002-Stop-3",
-          "latitude": 29.9648396,
-          "longitude": 31.2753026,
-          "node_id": 6588307086,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R002-Stop-4",
+          "stop_id": "R1-Stop-2",
           "latitude": 29.97030555,
           "longitude": 31.28934255,
           "node_id": 880186277,
           "student_count": 1,
           "student_ids": [
-            "S002"
+            "S2"
           ]
         },
         {
-          "stop_id": "R002-Stop-5",
-          "latitude": 29.9820661,
-          "longitude": 31.290808,
-          "node_id": 13483376921,
-          "student_count": 0,
-          "student_ids": []
-        },
-        {
-          "stop_id": "R002-Stop-6",
-          "latitude": 29.9609816,
-          "longitude": 31.278579999999998,
-          "node_id": 6585990912,
+          "stop_id": "R1-Stop-3",
+          "latitude": 29.9651139,
+          "longitude": 31.285523599999998,
+          "node_id": 6594701704,
           "student_count": 1,
           "student_ids": [
-            "S001"
+            "S5"
           ]
         },
         {
-          "stop_id": "R002-Stop-7",
+          "stop_id": "R1-Stop-4",
+          "latitude": 29.9593879,
+          "longitude": 31.277238949999997,
+          "node_id": 6585990890,
+          "student_count": 1,
+          "student_ids": [
+            "S1"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-5",
+          "latitude": 29.9550634,
+          "longitude": 31.27443015,
+          "node_id": 6586427482,
+          "student_count": 1,
+          "student_ids": [
+            "S4"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-6",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -177,61 +103,107 @@
           "student_ids": []
         }
       ],
-      "total_distance_km": 22.962115172818894,
-      "total_time_minutes": 68.41945574923955,
-      "profit_margin": 0.2477037305945867
+      "total_distance_km": 11.824343182228,
+      "total_time_minutes": 36.550890438210246,
+      "profit_margin": 0.815047939133661
+    },
+    {
+      "route_id": "R2",
+      "bus_type": "Large",
+      "max_trip_time_minutes": 75,
+      "stops": [
+        {
+          "stop_id": "R2-Stop-0",
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "node_id": 2208869932,
+          "student_count": 0,
+          "student_ids": []
+        },
+        {
+          "stop_id": "R2-Stop-1",
+          "latitude": 29.9601732,
+          "longitude": 31.269575500000002,
+          "node_id": 426537691,
+          "student_count": 1,
+          "student_ids": [
+            "S6"
+          ]
+        },
+        {
+          "stop_id": "R2-Stop-2",
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "node_id": 2208869932,
+          "student_count": 0,
+          "student_ids": []
+        }
+      ],
+      "total_distance_km": 1.3444318453574438,
+      "total_time_minutes": 3.841233843878411,
+      "profit_margin": 0.10588977082497891
     }
   ],
   "assigned_students": [
     {
-      "id": "S001",
-      "latitude": 29.96,
-      "longitude": 31.28,
+      "id": "S1",
+      "latitude": 29.958506,
+      "longitude": 31.276834,
       "age": 10,
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R002"
+      "assigned_route": "R1"
     },
     {
-      "id": "S002",
+      "id": "S2",
       "latitude": 29.97,
       "longitude": 31.29,
       "age": 12,
       "school_stage": "MIDDLE",
       "walk_radius_m": 100,
       "fee": 120.0,
-      "assigned_route": "R002"
+      "assigned_route": "R1"
     },
     {
-      "id": "S003",
+      "id": "S3",
       "latitude": 29.98,
       "longitude": 31.27,
       "age": 15,
       "school_stage": "HIGH",
       "walk_radius_m": 200,
       "fee": 150.0,
-      "assigned_route": "R001"
+      "assigned_route": "R1"
     },
     {
-      "id": "S004",
+      "id": "S4",
       "latitude": 29.955,
       "longitude": 31.275,
       "age": 11,
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R002"
+      "assigned_route": "R1"
     },
     {
-      "id": "S005",
+      "id": "S5",
       "latitude": 29.965,
       "longitude": 31.285,
       "age": 13,
       "school_stage": "MIDDLE",
       "walk_radius_m": 100,
       "fee": 120.0,
-      "assigned_route": "R001"
+      "assigned_route": "R1"
+    },
+    {
+      "id": "S6",
+      "latitude": 29.960161,
+      "longitude": 31.26982,
+      "age": 10,
+      "school_stage": "ELEMENTARY",
+      "walk_radius_m": 0,
+      "fee": 100.0,
+      "assigned_route": "R2"
     }
   ],
   "constraints": {}

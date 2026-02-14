@@ -15,7 +15,11 @@ import osmnx as ox
 import math
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
-from detour_engine import calculate_student_ride_time
+from detour_engine import (
+    calculate_student_ride_time, 
+    calculate_route_path_and_stats,
+    find_shortest_path_with_turns
+)
 
 
 def get_address_from_coords(lat, lon):
@@ -29,13 +33,14 @@ def get_address_from_coords(lat, lon):
         return "Address lookup error"
 
 
-def create_route_map(G, routes, students_to_routes=None, school_coords=None, output_file='route_map.html'):
+def create_route_map(G, routes, students_to_routes=None, all_students=None, school_coords=None, output_file='route_map.html'):
     """Create a comprehensive map showing routes, stops, and students.
     
     Args:
         G: NetworkX road network graph with 'travel_time' and 'is_safe_to_cross' attributes
         routes: List of Route objects
         students_to_routes: Dict mapping student id to route (for finding assignments)
+        all_students: List of all Student objects (to identify unserved ones)
         output_file: Output HTML file name
         
     Returns:
@@ -81,64 +86,66 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         
         # Draw route path connecting stops along actual road network
         if len(route.stops) > 1:
-            # For each consecutive pair of stops, find shortest path and draw it
-            # We draw all segments (0->1, 1->2, ... , N-1->N)
-            for stop_idx in range(len(route.stops) - 1):
-                from_stop = route.stops[stop_idx]
-                to_stop = route.stops[stop_idx + 1]
+            # Calculate the ENTIRE route path to ensure turns across stops are handled correctly
+            # Use travel_time weight to match the engine's choice of path
+            full_path_nodes, _ = calculate_route_path_and_stats(G, route.stops, weight='travel_time')
+            
+            if full_path_nodes:
+                # Convert node IDs to coordinates using edge geometries for precise road following
+                coord_offset = 0.00003 * (route_idx - 0.5)
+                path_coords = []
                 
-                # Skip ONLY if the stops are the exact same node (zero-length line)
-                if from_stop.node_id == to_stop.node_id:
-                    continue
+                for i in range(len(full_path_nodes) - 1):
+                    u, v = full_path_nodes[i], full_path_nodes[i+1]
+                    # Get edge data (handle multigraph keys)
+                    data = G.get_edge_data(u, v)
+                    if not data: continue
+                    
+                    # Pick the first available edge (standard for routing)
+                    edge_data = data[0] if 0 in data else list(data.values())[0]
+                    
+                    if 'geometry' in edge_data:
+                        # Extract all intermediate points from the road geometry
+                        # This prevents the line from "cutting through" buildings
+                        for lon, lat in edge_data['geometry'].coords:
+                            path_coords.append((lat + coord_offset, lon + coord_offset))
+                    else:
+                        # Fallback for straight roads
+                        path_coords.append((G.nodes[u]['y'] + coord_offset, G.nodes[u]['x'] + coord_offset))
                 
-                try:
-                    # Find shortest path between stops
-                    shortest_path_nodes = nx.shortest_path(
-                        G, 
-                        from_stop.node_id, 
-                        to_stop.node_id, 
-                        weight='length'
-                    )
-                    
-                    # Convert node IDs to coordinates and add a small offset based on route index
-                    # This helps to see overlapping routes side-by-side
-                    coord_offset = 0.00003 * (route_idx - 0.5)  # Offset by approx 3-5 meters
-                    path_coords = [
-                        (G.nodes[node]['y'] + coord_offset, G.nodes[node]['x'] + coord_offset) 
-                        for node in shortest_path_nodes
-                    ]
-                    
-                    # Draw the actual path on the map
-                    path_line = folium.PolyLine(
-                        path_coords,
-                        color=route_color,
-                        weight=5,
-                        opacity=0.8,
-                        popup=folium.Popup(f"Route {route.route_id}: {from_stop.node_id} → {to_stop.node_id}", max_width=200),
-                        dash_array='1, 0'  # Solid line for better visibility of overlaps
-                    ).add_to(m)
-                    
-                    # Add directional arrows using PolyLineTextPath
-                    # Since lines are already offset by coord_offset, we keep arrows centered on them
-                    folium.plugins.PolyLineTextPath(
-                        path_line,
-                        '          \u27A4          ',
-                        repeat=True,
-                        offset=6,  # Small offset to center text on line
-                        attributes={'fill': route_color, 'font-weight': 'bold', 'font-size': '18px'}
-                    ).add_to(m)
-                    
-                except nx.NetworkXNoPath:
-                    # Fallback to straight line if no path exists
-                    straight_coords = [(from_stop.coords[0], from_stop.coords[1]), 
-                                      (to_stop.coords[0], to_stop.coords[1])]
-                    folium.PolyLine(
-                        straight_coords,
-                        color='gray',
-                        weight=2,
-                        opacity=0.5,
-                        popup=f"Route {route.route_id}: No path found"
-                    ).add_to(m)
+                # Add the final node
+                last_node = full_path_nodes[-1]
+                path_coords.append((G.nodes[last_node]['y'] + coord_offset, G.nodes[last_node]['x'] + coord_offset))
+                
+                # Draw the full path on the map
+                path_polyline = folium.PolyLine(
+                    path_coords,
+                    color=route_color,
+                    weight=5,
+                    opacity=0.8,
+                    popup=folium.Popup(f"Route {route.route_id} complete path", max_width=450),
+                    dash_array='1, 0'
+                ).add_to(m)
+                
+                # Add directional arrows
+                folium.plugins.PolyLineTextPath(
+                    path_polyline,
+                    '          \u27A4          ',
+                    repeat=True,
+                    offset=6,
+                    attributes={'fill': route_color, 'font-weight': 'bold', 'font-size': '24'}
+                ).add_to(m)
+            else:
+                # Fallback to straight lines if path calculation fails
+                straight_coords = [(s.coords[0], s.coords[1]) for s in route.stops]
+                folium.PolyLine(
+                    straight_coords,
+                    color='gray',
+                    weight=2,
+                    opacity=0.5,
+                    dash_array='5, 5',
+                    popup=f"Route {route.route_id}: Path calculation failed (Check for disconnected road network)"
+                ).add_to(m)
         
         # Add stop markers
         for stop_idx, stop in enumerate(route.stops):
@@ -177,8 +184,9 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 folium.CircleMarker(
                     location=(stop.coords[0], stop.coords[1]),
                     radius=12,
-                    popup=folium.Popup(f"<b>{label}: {route.route_id}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}<br>Node: {stop.node_id}{student_list_html}", max_width=400),
+                    popup=folium.Popup(f"<b>{label}: {route.route_id}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}{student_list_html}", max_width=200),
                     tooltip=f"{route.route_id} {label}",
+
                     color='darkgreen',
                     fill=True,
                     fillColor='lightgreen',
@@ -189,7 +197,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 # Add a label showing student count at school stop
                 folium.Marker(
                     location=(stop.coords[0], stop.coords[1]),
-                    popup=folium.Popup(f"<b>{route.route_id}: SCHOOL</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>{student_count} students{student_list_html}", max_width=400),
+                    popup=folium.Popup(f"<b>{route.route_id}: SCHOOL</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>{student_count} students{student_list_html}", max_width=200),
                     icon=folium.Icon(
                         color='green',
                         icon_color='white',
@@ -202,8 +210,9 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 folium.CircleMarker(
                     location=(stop.coords[0], stop.coords[1]),
                     radius=8,
-                    popup=folium.Popup(f"<b>Stop: {route.route_id}-{stop_idx}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}<br>Node: {stop.node_id}{student_list_html}", max_width=400),
+                    popup=folium.Popup(f"<b>Stop: {route.route_id}-{stop_idx}</b><br>Coords: {stop.coords[0]:.6f}, {stop.coords[1]:.6f}<br>Count: {student_count}{student_list_html}", max_width=200),
                     tooltip=f"{route.route_id} Stop {stop_idx} ({student_count} students)",
+
                     color=route_color,
                     fill=True,
                     fillColor=route_color,
@@ -239,36 +248,69 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                     break
             
             if stop_idx != -1:
-                for i in range(stop_idx, len(route.stops) - 1):
-                    try:
-                        ride_time += nx.shortest_path_length(G, route.stops[i].node_id, route.stops[i+1].node_id, weight='travel_time')
-                    except:
-                        continue
+                # Use turn-aware calculation for student's individual ride
+                remaining_stops = route.stops[stop_idx:]
+                _, ride_time = calculate_route_path_and_stats(G, remaining_stops, weight='travel_time')
             
             # Calculate Direct Ride Time (from student home node to school)
             direct_time = "N/A"
             try:
                 student_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
                 school_node = route.stops[-1].node_id
-                direct_time = nx.shortest_path_length(G, student_node, school_node, weight='travel_time')
-                direct_time = f"{direct_time:.1f} min"
+                # Use turn-aware search for direct potential too
+                _, direct_time_mins = find_shortest_path_with_turns(G, student_node, school_node, weight='travel_time')
+                direct_time = f"{direct_time_mins:.1f} min"
             except:
                 pass
 
-            # Marker for student home (Point/Marker instead of Circle)
+            # Calculate Actual Walking Distance
+            walk_dist_m = 9999
+            try:
+                # Use a more robust starting node (frontage-biased)
+                u, v, k = ox.nearest_edges(G, student_obj.coords[1], student_obj.coords[0])
+                # Check both endpoints of the nearest edge and pick the one closer to the stop
+                d_u = nx.shortest_path_length(G, u, stop.node_id, weight='length')
+                d_v = nx.shortest_path_length(G, v, stop.node_id, weight='length')
+                walk_dist_m = min(d_u, d_v)
+            except:
+                # Fallback to nearest node if edge logic fails
+                try:
+                    s_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
+                    walk_dist_m = nx.shortest_path_length(G, s_node, stop.node_id, weight='length')
+                except:
+                    # Fallback to Haversine if no road path
+                    lat1, lon1 = student_obj.coords
+                lat2, lon2 = stop.coords
+                phi1, phi2 = math.radians(lat1), math.radians(lat2)
+                dphi = math.radians(lat2 - lat1)
+                dlambda = math.radians(lon2 - lon1)
+                a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+                walk_dist_m = 2 * 6371000 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            walk_warning_html = ""
+            if student_obj.walk_radius > 0:
+                walk_info = f"{walk_dist_m:.0f}m / {student_obj.walk_radius}m"
+                if walk_dist_m > student_obj.walk_radius + 5:
+                    walk_warning_html = f'<br><b style="color:red;">⚠️ WARNING: Walk exceeds limit ({walk_dist_m:.0f}m)</b>'
+            else:
+                walk_info = f"{walk_dist_m:.0f}m (Door-to-Door Required)"
+                if walk_dist_m > 20: # 20m tolerance for snapping to nearest road
+                    walk_warning_html = f'<br><b style="color:red;">⚠️ WARNING: House too far from road ({walk_dist_m:.0f}m)</b>'
+
+            # Marker for student home
             folium.Marker(
                 location=student_obj.coords,
                 popup=folium.Popup(f"""
-                <div style="width: 400px;">
+                <div style="width: 200px;">
                     <b>Student: {student_obj.id}</b><br>
                     Stage: {student_obj.school_stage.name}<br>
                     Address: {address_name}<br>
                     <div style="margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">
                         <b>Routing Details:</b><br>
-                        Assigned Route: {route.route_id}<br>
-                        Assigned Ride: {ride_time:.1f} min<br>
+                        Assigned Route: [ {route.route_id} ]<br>
+                        Actual Ride Time: {ride_time:.1f} min<br>
                         Direct Potential: {direct_time}<br>
-                        Walk to Stop: {student_obj.walk_radius}m
+                        Walk to Stop: {walk_info} {walk_warning_html}
                     </div>
                 </div>
                 """, max_width=450),
@@ -300,7 +342,7 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                         color=route_color,
                         weight=2,
                         opacity=0.4,
-                        popup=folium.Popup(f"{student_obj.id} walks to {route_color} {stop.node_id}", max_width=300),
+                        popup=folium.Popup(f"{student_obj.id} Walk Path", max_width=300),
                         dash_array='2, 2',
                         dash_offset='5'
                     ).add_to(m)
@@ -326,6 +368,46 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                     opacity=0.2
                 ).add_to(m)
     
+    # Add unserved students (failed assignments)
+    if all_students:
+        for student in all_students:
+            if not student.is_served:
+                print(f"Geocoding address for unassigned student {student.id}...")
+                address_name = get_address_from_coords(student.coords[0], student.coords[1])
+                failure_msg = getattr(student, 'failure_reason', 'No valid insertion found')
+                
+                folium.CircleMarker(
+                    location=student.coords,
+                    radius=7,
+                    popup=folium.Popup(f"""
+                    <div style="width: 300px;">
+                        <b style="color:red;">UNASSIGNED: {student.id}</b><br>
+                        Stage: {student.school_stage.name}<br>
+                        Address: {address_name}<br>
+                        <div style="margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">
+                            <b>Reason for Failure:</b><br>
+                            <span style="color:darkred;">{failure_msg}</span>
+                        </div>
+                    </div>
+                    """, max_width=400),
+                    tooltip=f"UNASSIGNED: {student.id}",
+                    color='black',
+                    fill=True,
+                    fillColor='black',
+                    fillOpacity=0.6,
+                    weight=3
+                ).add_to(m)
+
+    # Calculate total served students and total pool
+    total_assigned = 0
+    total_pool = len(all_students) if all_students else 0
+    
+    if all_students:
+        total_assigned = sum(1 for s in all_students if s.is_served)
+    else:
+        # Fallback: sum of students in displayed routes
+        total_assigned = sum(sum(len(stop.students) for stop in r.stops) for r in routes)
+    
     # Add legend and statistics
     stats_html = ""
     for route_idx, route in enumerate(routes):
@@ -339,12 +421,15 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
         <div style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 5px;">
             <p style="margin: 0; font-weight: bold; color: {route_color};">Route {route.route_id}</p>
             <p style="margin: 0; font-size: 12px;">
-                Stops: {len(route.stops) - 2} | Students: {student_count}<br>
+                Stops: {len(route.stops) - 2} | Students: {student_count} / {total_pool}<br>
                 Distance: {route.total_distance:.2f} km<br>
                 Ride Time: {ride_time:.1f} / {route.route_tmax} min (Total: {route.total_time:.1f})
             </p>
         </div>
         """
+
+    unassigned_count = total_pool - total_assigned
+    unassigned_text = f"<br><span style='color:red; font-size:11px;'>({unassigned_count} unassigned)</span>" if unassigned_count > 0 else ""
 
     legend_html = f'''
     <div style="position: fixed; 
@@ -352,14 +437,20 @@ def create_route_map(G, routes, students_to_routes=None, school_coords=None, out
                 background-color: white; border:2px solid grey; z-index:9999; 
                 font-size:14px; padding: 10px; border-radius: 5px;">
         <p style="margin: 0; font-weight: bold;">Map Legend</p>
+        <div style="font-size: 12px; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-bottom: 5px;">
+            Total Students: {total_pool} | Served: {total_assigned} {unassigned_text}
+        </div>
         <p style="margin: 5px 0;">
             <span style="color: darkgreen; font-weight: bold;">●</span> School Location (Start/End)
         </p>
         <p style="margin: 5px 0;">
-            <span style="color: lightblue;">●</span> Student Home Location
+            <span style="color: blue;">●</span> Student Home Location
         </p>
         <p style="margin: 5px 0;">
-            <span style="color: red;">●</span> Bus Stop / Boarding Point
+            <span style="color: red;">●</span> Bus Stop (Frontage/Stop)
+        </p>
+        <p style="margin: 5px 0;">
+            <span style="color: black;">●</span> Unassigned Student (Failed)
         </p>
         <p style="margin: 10px 0 5px 0; font-weight: bold;">Route Statistics</p>
         {stats_html}

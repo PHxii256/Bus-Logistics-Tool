@@ -12,6 +12,146 @@ This module provides the core algorithms for:
 import networkx as nx
 import osmnx as ox
 import math
+import heapq
+from shapely.geometry import Point, LineString
+from shapely.ops import substring
+
+
+def get_turn_penalty(bearing1, bearing2):
+    """Calculate a time penalty based on the difference between two edge bearings.
+    
+    Args:
+        bearing1: Bearing of the incoming edge
+        bearing2: Bearing of the outgoing edge
+        
+    Returns:
+        float: Penalty in minutes (Massive for U-turns to make them illegal)
+    """
+    if bearing1 is None or bearing2 is None:
+        return 0
+        
+    angle_diff = abs(bearing1 - bearing2)
+    if angle_diff > 180:
+        angle_diff = 360 - angle_diff
+        
+    # U-turn penalty (very sharp angles) - SET TO MASSIVE TO MAKE ILLEGAL
+    if angle_diff > 140:
+        return 9999.0
+    
+    # Normal turn penalty (90 degrees approx)
+    if angle_diff > 45:
+        return 0.2
+        
+    return 0.0
+
+
+def calculate_weighted_path_time(graph, path_nodes):
+    """Calculate total travel time including turn penalties for a given path.
+    """
+    if not path_nodes or len(path_nodes) < 2:
+        return 0.0
+        
+    total_time = 0.0
+    prev_bearing = None
+    
+    for i in range(len(path_nodes) - 1):
+        u, v = path_nodes[i], path_nodes[i+1]
+        
+        # Get edge data (using first available key)
+        edge_data = graph.get_edge_data(u, v)
+        if not edge_data:
+            continue
+            
+        # Handle Multigraph
+        data = edge_data[0] if 0 in edge_data else list(edge_data.values())[0]
+        
+        # Add travel time
+        total_time += data.get('travel_time', 0)
+        
+        # Add turn penalty if we have a previous edge
+        current_bearing = data.get('bearing')
+        if prev_bearing is not None:
+            total_time += get_turn_penalty(prev_bearing, current_bearing)
+            
+        prev_bearing = current_bearing
+        
+    return total_time
+
+
+def find_shortest_path_with_turns(graph, source, target, weight='travel_time', initial_bearing=None):
+    """Find the shortest path while making U-turns effectively illegal.
+    
+    Uses a custom Dijkstra where the state is (node, incoming_bearing).
+    This prevents 180-degree turns and applies minor penalties for 90-degree turns.
+    """
+    if source == target:
+        return [source], 0.0
+
+    # distances[(node, prev_bearing)] = current_best_time
+    # Use a small epsilon for bearing comparison to avoid precision issues
+    distances = {}
+    
+    # (time, current_node, prev_bearing, path)
+    pq = [(0.0, source, initial_bearing, [source])]
+    
+    while pq:
+        (current_time, current_node, prev_bearing, path) = heapq.heappop(pq)
+        
+        if current_node == target:
+            return path, current_time
+            
+        state = (current_node, round(prev_bearing, 2) if prev_bearing is not None else None)
+        if state in distances and distances[state] <= current_time:
+            continue
+        distances[state] = current_time
+        
+        if current_node not in graph:
+            continue
+            
+        for neighbor in graph.successors(current_node):
+            edge_data_dict = graph.get_edge_data(current_node, neighbor)
+            for key, data in edge_data_dict.items():
+                cost = data.get(weight, 0)
+                current_bearing = data.get('bearing')
+                
+                # IMPORTANT: If the edge has no bearing, we can't do turn penalties
+                # But OSMnx add_edge_bearings usually ensures it's there.
+                
+                penalty = get_turn_penalty(prev_bearing, current_bearing)
+                
+                # If penalty is massive (> 1000), it's an illegal 180-degree turn
+                if penalty > 1000:
+                    continue
+                    
+                new_time = current_time + cost + penalty
+                # Handle None bearing gracefully
+                bearing_key = round(current_bearing, 2) if current_bearing is not None else None
+                new_state = (neighbor, bearing_key)
+                
+                if new_state not in distances or distances[new_state] > new_time:
+                    heapq.heappush(pq, (new_time, neighbor, current_bearing, path + [neighbor]))
+                
+    return None, float('inf')
+
+
+def shortest_path_length_with_turns(graph, source, target, weight='travel_time', initial_bearing=None):
+    """Helper to get only the time from the turn-aware search."""
+    _, time = find_shortest_path_with_turns(graph, source, target, weight=weight, initial_bearing=initial_bearing)
+    return time
+
+
+def get_bearing_of_path(graph, path):
+    """Get the bearing of the last edge in a path."""
+    if not path or len(path) < 2:
+        return None
+    u, v = path[-2], path[-1]
+    edge_data = graph.get_edge_data(u, v)
+    if not edge_data:
+        return None
+    data = edge_data[0] if 0 in edge_data else list(edge_data.values())[0]
+    return data.get('bearing')
+
+
 from entities import Stop, Route, Student
 
 
@@ -20,92 +160,125 @@ from entities import Stop, Route, Student
 # ============================================================================
 
 def snap_address_to_edge(coords, graph):
-    """Snap student coordinates to the nearest road edge.
+    """Snap student coordinates to the exact point on the nearest road edge by splitting it.
     
-    This function finds the closest road edge to the student's address
-    and returns a point on that edge (the snapped location). This is more
-    realistic than just using the nearest node, as students can be picked
-    up/dropped off anywhere along a road.
-    
-    Args:
-        coords: Tuple of (latitude, longitude)
-        graph: NetowrkX/OSMnx road network graph G
-        
-    Returns:
-        Tuple of (node_id, snapped_coords) where:
-            - node_id: Integer ID of one endpoint of the nearest edge
-            - snapped_coords: Tuple of (lat, lon) on the snapped edge
+    This creates a virtual node in the graph at the projected point, effectively
+    forcing the routing algorithm to pass right in front of the house.
     """
     lat, lon = coords
+    # Use a unique but consistent INT ID for the virtual node for OSMnx compatibility
+    lat_key = int(abs(lat) * 1000000)
+    lon_key = int(abs(lon) * 1000000)
+    vnode_id = int(f"999{lat_key}{lon_key}")
     
-    # Find nearest node to the coordinates
-    nearest_node = ox.nearest_nodes(graph, lon, lat)
+    # If the virtual node already exists, return it
+    if vnode_id in graph:
+        return (vnode_id, (graph.nodes[vnode_id]['y'], graph.nodes[vnode_id]['x']))
+
     
-    # Find all edges connected to this node and nearby nodes
-    # For better accuracy, we also check neighbors
-    min_distance = float('inf')
-    best_edge = None
-    best_point = None
+    point_geom = Point(lon, lat)
     
-    # Check edges from nearby nodes (expand search)
-    nodes_to_check = set([nearest_node])
-    nodes_to_check.update(nx.single_source_shortest_path_length(
-        graph, nearest_node, cutoff=1
-    ).keys())
-    
-    for node in nodes_to_check:
-        # Check outgoing edges from this node
-        for neighbor in graph.successors(node):
-            # Get all edges between this node pair (multi-edges possible)
-            for key, edge_data in graph[node][neighbor].items():
-                # Calculate distance from coords to this edge
-                # For simplicity, use distance to the midpoint of the edge
-                node_coords = (graph.nodes[node]['y'], graph.nodes[node]['x'])
-                neighbor_coords = (graph.nodes[neighbor]['y'], graph.nodes[neighbor]['x'])
+    try:
+        # Find nearest edge (u, v, key)
+        u, v, k = ox.nearest_edges(graph, lon, lat)
+        original_data = graph.get_edge_data(u, v, k)
+        if original_data is None:
+            raise ValueError(f"No edge data found for ({u}, {v}, {k})")
+        
+        edge_data = original_data.copy()
+        
+        # Get edge geometry for interpolation
+        if 'geometry' in edge_data:
+            line = edge_data['geometry']
+        else:
+            u_node = graph.nodes[u]
+            v_node = graph.nodes[v]
+            line = LineString([(u_node['x'], u_node['y']), (v_node['x'], v_node['y'])])
+            
+        # Project house onto edge and find exact intersection point
+        projected_dist = line.project(point_geom)
+        snapped_point = line.interpolate(projected_dist)
+        snapped_coords = (snapped_point.y, snapped_point.x)
+        
+        # 1. Add the virtual node to the graph
+        graph.add_node(vnode_id, x=snapped_coords[1], y=snapped_coords[0], street_count=2)
+        
+        # 2. Calculate the split ratio for attributes
+        line_len = line.length if line.length > 0 else 1.0
+        ratio = projected_dist / line_len
+        # Clamp ratio to avoid very small edges
+        ratio = max(0.01, min(0.99, ratio))
+        
+        total_len = edge_data.get('length', 1.0)
+        
+        # 3. Create two new edges by splitting the original
+        data1 = edge_data.copy()
+        data2 = edge_data.copy()
+        
+        data1['length'] = total_len * ratio
+        data2['length'] = total_len * (1 - ratio)
+        
+        # Split geometry if it exists
+        if 'geometry' in edge_data:
+            line = edge_data['geometry']
+            # Use shapely.ops.substring for precise splitting
+            data1['geometry'] = substring(line, 0, projected_dist)
+            data2['geometry'] = substring(line, projected_dist, line.length)
+        
+        # Approximate travel times
+        if 'travel_time' in edge_data:
+            data1['travel_time'] = edge_data['travel_time'] * ratio
+            data2['travel_time'] = edge_data['travel_time'] * (1 - ratio)
+            
+        # Add the new edges and remove the original one
+        graph.add_edge(u, vnode_id, **data1)
+        graph.add_edge(vnode_id, v, **data2)
+        
+        if graph.has_edge(u, v, k):
+            graph.remove_edge(u, v, k)
+            
+        # 4. Handle the reverse direction (if it exists)
+        if graph.has_edge(v, u):
+            rev_options = graph.get_edge_data(v, u)
+            for rev_k, rev_data_orig in rev_options.items():
+                rev_data = rev_data_orig.copy()
+                rev_data1 = rev_data.copy()
+                rev_data2 = rev_data.copy()
+                rev_data1['length'] = rev_data.get('length', 1.0) * (1 - ratio)
+                rev_data2['length'] = rev_data.get('length', 1.0) * ratio
                 
-                # Midpoint of edge (simplified - not projecting onto edge properly)
-                mid_lat = (node_coords[0] + neighbor_coords[0]) / 2
-                mid_lon = (node_coords[1] + neighbor_coords[1]) / 2
-                
-                # Simple Euclidean distance (acceptable for small areas)
-                dist = ((lat - mid_lat)**2 + (lon - mid_lon)**2) ** 0.5
-                
-                if dist < min_distance:
-                    min_distance = dist
-                    best_edge = (node, neighbor, key)
-                    best_point = (mid_lat, mid_lon)
-    
-    if best_edge is None:
-        # Fallback: just use nearest node with its coordinates
-        best_node = nearest_node
-        return (best_node, (graph.nodes[best_node]['y'], graph.nodes[best_node]['x']))
-    
-    # Return the node at the start of the edge and snapped point coordinates
-    return (best_edge[0], best_point)
+                if 'travel_time' in rev_data:
+                    rev_data1['travel_time'] = rev_data['travel_time'] * (1 - ratio)
+                    rev_data2['travel_time'] = rev_data['travel_time'] * ratio
+
+                if 'geometry' in rev_data:
+                    rev_line = rev_data['geometry']
+                    rev_len = rev_line.length
+                    # Split at (rev_len - projected_dist) because rev edge starts at v
+                    rev_data1['geometry'] = substring(rev_line, 0, rev_len - projected_dist)
+                    rev_data2['geometry'] = substring(rev_line, rev_len - projected_dist, rev_len)
+                    
+                graph.add_edge(v, vnode_id, **rev_data1)
+                graph.add_edge(vnode_id, u, **rev_data2)
+                graph.remove_edge(v, u, rev_k)
+                break
+            
+        return (vnode_id, snapped_coords)
+        
+    except Exception as e:
+        # Fallback to nearest node if edge splitting fails
+        nearest_id = ox.nearest_nodes(graph, lon, lat)
+        return (nearest_id, (graph.nodes[nearest_id]['y'], graph.nodes[nearest_id]['x']))
+
 
 
 def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_limit):
-    """Find all nodes reachable via safe pedestrian paths within radius.
-    
-    This function locates all nodes that can be reached from the given
-    coordinates without crossing any arterial roads. It respects the
-    student's maximum walking distance.
-    
-    Args:
-        coords: Tuple of (latitude, longitude)
-        graph: NetworkX/OSMnx road network graph
-        radius_meters: Search radius (meters) around coordinates
-        walk_distance_limit: Maximum student walk distance (meters)
-        
-    Returns:
-        List of tuples: (node_id, distance_to_node_m) for all safe nodes within range
-    """
+    """Find all nodes reachable via safe pedestrian paths within radius."""
     lat, lon = coords
     
-    # Find nearest node to start search
+    # Start from the nearest node
     start_node = ox.nearest_nodes(graph, lon, lat)
     
-    # BFS with constraint: only traverse safe edges and respect distance limit
     safe_nodes = []
     visited = set()
     queue = [(start_node, 0)]  # (node, distance_so_far)
@@ -113,34 +286,30 @@ def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_li
     while queue:
         current_node, dist_so_far = queue.pop(0)
         
-        if current_node in visited:
+        if current_node in visited or dist_so_far > walk_distance_limit:
             continue
         visited.add(current_node)
         
-        # Check if this node is within our distance limits
-        if dist_so_far <= walk_distance_limit:
-            safe_nodes.append((current_node, dist_so_far))
+        safe_nodes.append((current_node, dist_so_far))
         
-        # Explore neighbors via safe edges only
-        if dist_so_far < walk_distance_limit:
-            for neighbor in graph.successors(current_node):
-                if neighbor not in visited:
-                    # Get edge data (handle multi-edges)
-                    edge_data = graph[current_node][neighbor]
-                    
-                    # Find safest path through this edge pair
-                    is_safe = False
-                    edge_length = float('inf')
-                    
-                    for key, data in edge_data.items():
-                        if data.get('is_safe_to_cross', True):  # Prefer safe edges
-                            is_safe = True
-                            edge_length = min(edge_length, data.get('length', 0))
-                    
-                    if is_safe:
-                        new_dist = dist_so_far + edge_length
-                        if new_dist <= walk_distance_limit:
-                            queue.append((neighbor, new_dist))
+        # Explore neighbors
+        for neighbor in graph.successors(current_node):
+            edge_data = graph[current_node][neighbor]
+            
+            # Use distance/travel_time as the weight for pedestrian walk
+            # (Assuming all simple roads are safe for now, filters can be added)
+            is_safe = False
+            edge_length = float('inf')
+            
+            for key, data in edge_data.items():
+                if data.get('is_safe_to_cross', True):
+                    is_safe = True
+                    edge_length = min(edge_length, data.get('length', 0))
+            
+            if is_safe:
+                new_dist = dist_so_far + edge_length
+                if new_dist <= walk_distance_limit:
+                    queue.append((neighbor, new_dist))
     
     return safe_nodes
 
@@ -148,6 +317,7 @@ def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_li
 # ============================================================================
 # ROUTE ANALYSIS: Calculate distance, time, and safety for routes
 # ============================================================================
+
 
 def calculate_route_distance(route, graph):
     """Calculate total distance of a route in kilometers.
@@ -170,12 +340,13 @@ def calculate_route_distance(route, graph):
         to_node = route.stops[i + 1].node_id
         
         try:
-            # Use shortest path in terms of distance
-            length_m = nx.shortest_path_length(
+            # Use shortest path in terms of distance (turn-aware)
+            time_with_turns = shortest_path_length_with_turns(
                 graph, from_node, to_node, weight='length'
             )
-            total_distance_m += length_m
-        except nx.NetworkXNoPath:
+            if time_with_turns < 1000000: # Check if path exists
+                total_distance_m += time_with_turns
+        except Exception:
             # If no path exists, log warning
             print(f"Warning: No path between stops {from_node} and {to_node}")
             continue
@@ -183,51 +354,59 @@ def calculate_route_distance(route, graph):
     return total_distance_m / 1000  # Convert to km
 
 
+def calculate_route_path_and_stats(graph, stops, weight='travel_time'):
+    """Calculate the full path and travel time for a sequence of stops.
+    
+    This function ensures that turns BETWEEN segments (at the stops) are also
+    penalized, preventing the bus from doing a 180 at a stop.
+    
+    Returns:
+        tuple: (full_path_nodes, total_time)
+    """
+    if not stops:
+        return [], 0.0
+    if len(stops) == 1:
+        return [stops[0].node_id], 0.0
+        
+    full_path = []
+    total_time = 0.0
+    last_bearing = None
+    
+    for i in range(len(stops) - 1):
+        u_node = stops[i].node_id
+        v_node = stops[i+1].node_id
+        
+        path_segment, segment_time = find_shortest_path_with_turns(
+            graph, u_node, v_node, weight=weight, initial_bearing=last_bearing
+        )
+        
+        if not path_segment:
+            return None, float('inf')
+            
+        total_time += segment_time
+        
+        if not full_path:
+            full_path.extend(path_segment)
+        else:
+            full_path.extend(path_segment[1:])
+            
+        last_bearing = get_bearing_of_path(graph, path_segment)
+        
+    return full_path, total_time
+
+
 def calculate_route_time(route, graph):
     """Calculate total travel time of a route in minutes.
-    
-    Args:
-        route: Route object with ordered stops
-        graph: NetworkX road network with 'travel_time' edge attribute
-        
-    Returns:
-        float: Total travel time in minutes
     """
     if len(route.stops) < 2:
         return 0.0
     
-    total_time_minutes = 0
-    
-    # Sum travel times between consecutive stops
-    for i in range(len(route.stops) - 1):
-        from_node = route.stops[i].node_id
-        to_node = route.stops[i + 1].node_id
-        
-        try:
-            # Use shortest path in terms of travel_time
-            time_minutes = nx.shortest_path_length(
-                graph, from_node, to_node, weight='travel_time'
-            )
-            total_time_minutes += time_minutes
-        except nx.NetworkXNoPath:
-            print(f"Warning: No path between stops {from_node} and {to_node}")
-            continue
-    
-    return total_time_minutes
+    _, total_time = calculate_route_path_and_stats(graph, route.stops)
+    return total_time if total_time != float('inf') else 9999.0
 
 
 def calculate_student_ride_time(route, graph):
     """Calculate the travel time from the first student boarding to the end (school).
-    
-    The student ride time is the path duration from the first stop that has 
-    students assigned to it, until the final stop (the school).
-    
-    Args:
-        route: Route object with ordered stops
-        graph: NetworkX road network
-        
-    Returns:
-        float: Student ride time in minutes
     """
     if len(route.stops) < 2:
         return 0.0
@@ -235,33 +414,16 @@ def calculate_student_ride_time(route, graph):
     # Find the index of the first stop that has students
     first_student_stop_idx = -1
     for i, stop in enumerate(route.stops):
-        # Even if it's the school (stop len-1), if students are there it counts? 
-        # Usually school is the dropoff, so pickups happen at 0 to len-2.
         if stop.get_student_count() > 0:
             first_student_stop_idx = i
             break
             
-    if first_student_stop_idx == -1:
+    if first_student_stop_idx == -1 or first_student_stop_idx >= len(route.stops) - 1:
         return 0.0
         
-    # If the first student is also at the last stop (school), ride time is 0
-    if first_student_stop_idx >= len(route.stops) - 1:
-        return 0.0
-        
-    ride_time = 0.0
-    for i in range(first_student_stop_idx, len(route.stops) - 1):
-        from_node = route.stops[i].node_id
-        to_node = route.stops[i + 1].node_id
-        
-        try:
-            time_minutes = nx.shortest_path_length(
-                graph, from_node, to_node, weight='travel_time'
-            )
-            ride_time += time_minutes
-        except nx.NetworkXNoPath:
-            continue
-            
-    return ride_time
+    student_stops = route.stops[first_student_stop_idx:]
+    _, ride_time = calculate_route_path_and_stats(graph, student_stops)
+    return ride_time if ride_time != float('inf') else 9999.0
 
 
 def calculate_student_ride_time_potential(route, new_stop, insert_position, graph):
@@ -296,12 +458,9 @@ def calculate_student_ride_time_potential(route, new_stop, insert_position, grap
         
     ride_time = 0.0
     for i in range(first_idx, len(temp_stops) - 1):
-        try:
-            ride_time += nx.shortest_path_length(
-                graph, temp_stops[i].node_id, temp_stops[i+1].node_id, weight='travel_time'
-            )
-        except:
-            continue
+        path, time_minutes = find_shortest_path_with_turns(graph, temp_stops[i].node_id, temp_stops[i+1].node_id)
+        if path:
+            ride_time += time_minutes
     return ride_time
 
 
@@ -355,74 +514,30 @@ def is_route_safe(route, graph, walk_distance_limits):
 def calculate_insertion_cost(new_stop, route, insert_position, graph):
     """Calculate the time cost of inserting a stop at a specific position in a route.
     
-    The insertion cost is the change in total travel time when a new stop
-    is added between two existing stops (or at the ends).
-    
-    Formula: ΔT = time(previous → new) + time(new → next) - time(previous → next)
-    
-    Args:
-        new_stop: Stop object to be inserted
-        route: Existing Route object
-        insert_position: Integer position (0 = before first stop, len(stops) = after last)
-        graph: NetworkX road network with 'travel_time' edge attribute
-        
-    Returns:
-        Tuple of (insertion_cost_minutes: float, is_valid: bool, reason: str)
-            - insertion_cost_minutes: Time delta if valid
-            - is_valid: Whether the insertion is geometrically possible
-            - reason: Error message if not valid
+    This version re-calculates the relative path cost to ensure turn penalties 
+    are correctly handled across the entire route.
     """
     if insert_position < 0 or insert_position > len(route.stops):
         return None, False, f"Invalid insertion position {insert_position}"
     
-    # Case 1: Route is empty, just add stop (no insertion cost)
-    if len(route.stops) == 0:
-        return 0.0, True, "Empty route"
+    # Calculate original route time (cached if possible, but route objects are modified often)
+    _, old_time = calculate_route_path_and_stats(graph, route.stops)
     
-    # Case 2: Insert at the beginning
-    if insert_position == 0:
-        try:
-            time_forward = nx.shortest_path_length(
-                graph, new_stop.node_id, route.stops[0].node_id, weight='travel_time'
-            )
-            # Cost is just the time to first stop (no previous stop to remove)
-            return time_forward, True, "Insert at beginning"
-        except nx.NetworkXNoPath:
-            return None, False, f"No path from new stop to first existing stop"
+    # Create temporary stop list for evaluation
+    temp_stops = list(route.stops)
+    temp_stops.insert(insert_position, new_stop)
     
-    # Case 3: Insert at the end
-    if insert_position == len(route.stops):
-        try:
-            time_backward = nx.shortest_path_length(
-                graph, route.stops[-1].node_id, new_stop.node_id, weight='travel_time'
-            )
-            return time_backward, True, "Insert at end"
-        except nx.NetworkXNoPath:
-            return None, False, f"No path from last existing stop to new stop"
+    # Calculate new route time
+    _, new_time = calculate_route_path_and_stats(graph, temp_stops)
     
-    # Case 4: Insert in the middle
-    prev_stop = route.stops[insert_position - 1]
-    next_stop = route.stops[insert_position]
+    if new_time == float('inf'):
+        return None, False, "No path exists or illegal turns required"
     
-    try:
-        # Time for detour: prev → new → next
-        time_prev_to_new = nx.shortest_path_length(
-            graph, prev_stop.node_id, new_stop.node_id, weight='travel_time'
-        )
-        time_new_to_next = nx.shortest_path_length(
-            graph, new_stop.node_id, next_stop.node_id, weight='travel_time'
-        )
-        
-        # Time without detour: prev → next
-        time_prev_to_next = nx.shortest_path_length(
-            graph, prev_stop.node_id, next_stop.node_id, weight='travel_time'
-        )
-        
-        delta_time = time_prev_to_new + time_new_to_next - time_prev_to_next
-        return delta_time, True, "Insert in middle"
-        
-    except nx.NetworkXNoPath:
-        return None, False, f"No path between stops at insertion position"
+    # If old_time was inf (shouldn't happen for valid existing routes), 
+    # we just consider the new_time as the cost for starting a route.
+    delta_time = new_time - (old_time if old_time != float('inf') else 0)
+    
+    return delta_time, True, "Success"
 
 
 # ============================================================================
@@ -531,72 +646,89 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
     
     walk_limit = student_walk_distance_limit or new_student.walk_radius
     
+    # Mapping from node_id to specific coordinates (for virtual stops)
+    node_coords_mapping = {}
+    
+    # ALWAYS ensure the absolute frontage (virtual node) is the first candidate
+    # This is critical for precisely hitting the front of the house
+    frontage_node_id, frontage_coords = snap_address_to_edge(new_student.coords, graph)
+    candidate_node_ids = [frontage_node_id]
+    node_coords_mapping[frontage_node_id] = frontage_coords
+    
+    # 2. Find other candidate nodes within walking distance (only if walk_limit > 0)
+    if walk_limit > 0:
+        safe_nodes = find_safe_nodes_within_radius(new_student.coords, graph, 500, walk_limit)
+        for node_id, dist in sorted(safe_nodes, key=lambda x: x[1]):
+            if node_id not in candidate_node_ids:
+                candidate_node_ids.append(node_id)
+    
+    # To keep it efficient, we'll only check up to 5 best candidate nodes
+    candidate_node_ids = candidate_node_ids[:5]
+    
     for route in existing_routes:
+
         # If route has at least 2 stops (Start and End), strictly insert between them
         if len(route.stops) >= 2:
-            # insertion_position 1 means between stop 0 and 1
-            # range(1, len(route.stops)) gives indices 1, 2, ..., len-1
-            # if len=5, range starts at 1, ends at 4. (indices 1, 2, 3, 4)
-            # 1: [0, NEW, 1, 2, 3, 4]
-            # 4: [0, 1, 2, 3, NEW, 4]
-            # All these preserve 0 as start and 4 as end.
             start_pos = 1
             end_pos = len(route.stops)
         else:
-            # For empty or single-stop routes, allow any position
             start_pos = 0
             end_pos = len(route.stops) + 1
             
         # Try every valid insertion position in this route
         for position in range(start_pos, end_pos):
             
-            # Check if we can insert at this position
-            # First, find or create a stop near a node on this route
-            
-            # Simple strategy: snap student to nearest edge and create stop there
-            node_id, snapped_coords = snap_address_to_edge(new_student.coords, graph)
-            
-            # Check if a stop already exists at this node
-            existing_stop = None
-            for stop in route.stops:
-                if stop.node_id == node_id:
-                    existing_stop = stop
-                    break
-            
-            if existing_stop:
-                new_stop = existing_stop
-            else:
-                new_stop = Stop(node_id, snapped_coords[0], snapped_coords[1])
-            
-            # Calculate insertion cost
-            delta_time, is_valid, cost_reason = calculate_insertion_cost(
-                new_stop, route, position, graph
-            )
-            
-            if not is_valid:
-                continue
-            
-            # Validate constraints based on detour type
-            if detour_type == 'temporary':
-                valid, remaining, constraint_reason = validate_temporary_detour(
-                    new_stop, route, delta_time, daily_detour_budget
+            # Check each candidate node for this position
+            for node_id in candidate_node_ids:
+                # Check if a stop already exists at this node in this route
+                existing_stop = None
+                for stop in route.stops:
+                    if stop.node_id == node_id:
+                        existing_stop = stop
+                        break
+                
+                if existing_stop:
+                    eval_stop = existing_stop
+                else:
+                    # Use virtual snapped coords if available, else use graph node coords
+                    if node_id in node_coords_mapping:
+                        lat, lon = node_coords_mapping[node_id]
+                    else:
+                        lat = graph.nodes[node_id]['y']
+                        lon = graph.nodes[node_id]['x']
+                    
+                    eval_stop = Stop(node_id, lat, lon)
+
+                
+                # Calculate insertion cost
+                delta_time, is_valid, cost_reason = calculate_insertion_cost(
+                    eval_stop, route, position, graph
                 )
-                if not valid:
+                
+                if not is_valid:
                     continue
-            else:  # permanent
-                valid, new_ride_time, constraint_reason = validate_permanent_student(
-                    new_stop, route, position, delta_time, graph
-                )
-                if not valid:
-                    continue
-            
-            # Track best option
-            if delta_time < best_cost:
-                best_cost = delta_time
-                best_route = route
-                best_position = position
-                best_stop = new_stop
-                best_reason = f"Cost: {delta_time:.2f} min, {constraint_reason}"
+                
+                # Validate constraints based on detour type
+                if detour_type == 'temporary':
+                    valid, remaining, constraint_reason = validate_temporary_detour(
+                        eval_stop, route, delta_time, daily_detour_budget
+                    )
+                    if not valid:
+                        continue
+                else:  # permanent
+                    valid, new_ride_time, constraint_reason = validate_permanent_student(
+                        eval_stop, route, position, delta_time, graph
+                    )
+                    if not valid:
+                        continue
+                
+                # Track best option
+                if delta_time < best_cost:
+                    best_cost = delta_time
+                    best_route = route
+                    best_position = position
+                    best_stop = eval_stop
+                    best_reason = f"Cost: {delta_time:.2f} min, {constraint_reason}"
     
     # Return result
     if best_route is not None:

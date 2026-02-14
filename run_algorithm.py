@@ -9,7 +9,8 @@ import json
 from data_loader import setup_algorithm_inputs, print_input_summary
 from detour_engine import (
     calculate_route_distance, calculate_route_time,
-    cheapest_insertion, process_detour_request
+    cheapest_insertion, process_detour_request,
+    calculate_student_ride_time
 )
 from visualization import create_route_map
 
@@ -35,15 +36,33 @@ for u, v, k, data in G.edges(keys=True, data=True):
         except (ValueError, TypeError):
             base_speed = 30
 
-    if data['highway'] in ['primary', 'trunk', 'secondary']:
-        data['speed_kph'] = base_speed * 0.4
+    # Cairo Factor: Reduce speed based on road type for realism.
+    # Prioritize arterial roads (primary/secondary/tertiary) over residential.
+    highway = data.get('highway', 'unclassified')
+    if isinstance(highway, list): highway = highway[0]
+
+    if highway in ['primary', 'trunk']:
+        data['speed_kph'] = base_speed * 0.8  # Main roads are fast
         data['is_safe_to_cross'] = False
-    else:
-        data['speed_kph'] = base_speed * 0.7
+    elif highway in ['secondary', 'tertiary']:
+        data['speed_kph'] = base_speed * 0.6  # Secondary roads
+        data['is_safe_to_cross'] = False
+    elif highway in ['residential', 'living_street']:
+        data['speed_kph'] = base_speed * 0.3  # Residential roads are slower
         data['is_safe_to_cross'] = True
+    else:
+        # Others (links, unclassified, service, etc.)
+        data['speed_kph'] = base_speed * 0.2
+        data['is_safe_to_cross'] = True
+
+
 
     meters_per_min = (data['speed_kph'] * 1000) / 60
     data['travel_time'] = data['length'] / meters_per_min
+
+# Add bearings to edges to allow calculating turn angles later
+print("Adding edge bearings for turn-penalty calculations...")
+G = ox.bearing.add_edge_bearings(G)
 
 print(f"Graph ready: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges\n")
 
@@ -80,6 +99,7 @@ for student in students:
         print(f"✓ {student.id}: {message}")
         print(f"    Walk radius: {student.walk_radius}m, School stage: {student.school_stage.name}")
     else:
+        student.failure_reason = message
         print(f"✗ {student.id}: {message}")
 
 # Recalculate route metrics after assignments
@@ -102,7 +122,7 @@ print(f"{'='*80}\n")
 routes_with_students = [r for r in routes if r.get_student_count() > 0]
 
 if routes_with_students:
-    create_route_map(G, routes_with_students, school_coords=school_coords, output_file='route_map.html')
+    create_route_map(G, routes_with_students, all_students=students, school_coords=school_coords, output_file='route_map.html')
     print(f"\nRoute map created with:")
     print(f"  - {len(routes_with_students)} active routes")
     print(f"  - {sum(r.get_student_count() for r in routes_with_students)} students assigned")

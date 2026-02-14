@@ -11,8 +11,8 @@
       "east": 31.331909,
       "west": 29.92563
     },
-    "total_nodes": 11615,
-    "total_edges": 29985
+    "total_nodes": 11621,
+    "total_edges": 29994
   },
   "buses": [
     {
@@ -46,56 +46,26 @@
         },
         {
           "stop_id": "R1-Stop-1",
-          "latitude": 29.9798738,
-          "longitude": 31.2700807,
-          "node_id": 6304086265,
-          "student_count": 1,
-          "student_ids": [
-            "S3"
-          ]
-        },
-        {
-          "stop_id": "R1-Stop-2",
-          "latitude": 29.97030555,
-          "longitude": 31.28934255,
-          "node_id": 880186277,
+          "latitude": 29.97032826639092,
+          "longitude": 31.289354095085812,
+          "node_id": 9992997000031290000,
           "student_count": 1,
           "student_ids": [
             "S2"
           ]
         },
         {
-          "stop_id": "R1-Stop-3",
-          "latitude": 29.9651139,
-          "longitude": 31.285523599999998,
-          "node_id": 6594701704,
-          "student_count": 1,
-          "student_ids": [
-            "S5"
-          ]
-        },
-        {
-          "stop_id": "R1-Stop-4",
-          "latitude": 29.9593879,
-          "longitude": 31.277238949999997,
-          "node_id": 6585990890,
+          "stop_id": "R1-Stop-2",
+          "latitude": 29.958652751946577,
+          "longitude": 31.276961091398704,
+          "node_id": 9992995850631276834,
           "student_count": 1,
           "student_ids": [
             "S1"
           ]
         },
         {
-          "stop_id": "R1-Stop-5",
-          "latitude": 29.9550634,
-          "longitude": 31.27443015,
-          "node_id": 6586427482,
-          "student_count": 1,
-          "student_ids": [
-            "S4"
-          ]
-        },
-        {
-          "stop_id": "R1-Stop-6",
+          "stop_id": "R1-Stop-3",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -103,9 +73,9 @@
           "student_ids": []
         }
       ],
-      "total_distance_km": 11.824343182228,
-      "total_time_minutes": 36.550890438210246,
-      "profit_margin": 0.815047939133661
+      "total_distance_km": 10.3319920759554,
+      "total_time_minutes": 40.20157671618103,
+      "profit_margin": 0.5379092710010136
     },
     {
       "route_id": "R2",
@@ -122,9 +92,9 @@
         },
         {
           "stop_id": "R2-Stop-1",
-          "latitude": 29.9601732,
-          "longitude": 31.269575500000002,
-          "node_id": 426537691,
+          "latitude": 29.960181015184613,
+          "longitude": 31.26997478936844,
+          "node_id": 9992996016131269820,
           "student_count": 1,
           "student_ids": [
             "S6"
@@ -132,6 +102,26 @@
         },
         {
           "stop_id": "R2-Stop-2",
+          "latitude": 29.95519319138084,
+          "longitude": 31.27485149216989,
+          "node_id": 9992995500031275000,
+          "student_count": 1,
+          "student_ids": [
+            "S4"
+          ]
+        },
+        {
+          "stop_id": "R2-Stop-3",
+          "latitude": 29.9799007,
+          "longitude": 31.2704775,
+          "node_id": 6304086264,
+          "student_count": 1,
+          "student_ids": [
+            "S3"
+          ]
+        },
+        {
+          "stop_id": "R2-Stop-4",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -139,9 +129,9 @@
           "student_ids": []
         }
       ],
-      "total_distance_km": 1.3444318453574438,
-      "total_time_minutes": 3.841233843878411,
-      "profit_margin": 0.10588977082497891
+      "total_distance_km": 7.136747889981854,
+      "total_time_minutes": 46.6154879558924,
+      "profit_margin": 0.6286936136289343
     }
   ],
   "assigned_students": [
@@ -173,7 +163,7 @@
       "school_stage": "HIGH",
       "walk_radius_m": 200,
       "fee": 150.0,
-      "assigned_route": "R1"
+      "assigned_route": "R2"
     },
     {
       "id": "S4",
@@ -183,7 +173,7 @@
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R1"
+      "assigned_route": "R2"
     },
     {
       "id": "S5",
@@ -193,7 +183,7 @@
       "school_stage": "MIDDLE",
       "walk_radius_m": 100,
       "fee": 120.0,
-      "assigned_route": "R1"
+      "assigned_route": null
     },
     {
       "id": "S6",

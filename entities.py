@@ -28,6 +28,7 @@ class Student:
         self.walk_radius = calc_max_walk_distance(school_stage)
         self.assigned_stop = None
         self.is_served = False
+        self.failure_reason = ""
 
         
 

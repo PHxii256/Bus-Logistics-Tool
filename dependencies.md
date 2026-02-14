@@ -3,3 +3,4 @@
 - osmnx
 - folium
 - scikit-learn
+- geopy

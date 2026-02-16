@@ -74,15 +74,11 @@ class Stop:
             student.is_served = True
             
     def remove_student(self, student):
-        """Remove a student from this stop.
-        
-        Args:
-            student: Student object
-        """
+        """Safely remove a student and reset their status."""
         if student in self.students:
             self.students.remove(student)
-            if not self.students:  # If no students left
-                student.is_served = False
+            student.assigned_stop = None
+            student.is_served = False
                 
     def is_full(self, bus_capacity):
         """Check if this stop has reached capacity.

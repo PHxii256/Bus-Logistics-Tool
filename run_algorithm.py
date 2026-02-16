@@ -13,6 +13,8 @@ from detour_engine import (
     calculate_student_ride_time
 )
 from visualization import create_route_map
+from solution_state import ServiceSolution
+from alns_engine import ALNSEngine
 
 # ============================================================================
 # SETUP: Download graph and load input data
@@ -72,35 +74,30 @@ students, buses, routes, school_coords, config = setup_algorithm_inputs('input_d
 
 # Print summary
 print_input_summary(students, buses, routes, school_coords)
-
+# Pre-snap all students to the graph to save time during optimization
+print("\n[Optimization] Pre-snapping students to road network...")
+from detour_engine import snap_address_to_edge
+for s in students:
+    snap_address_to_edge(s.coords, G)
+print("Pre-snap complete.")
 # ============================================================================
 # ALGORITHM: Assign permanent students using Cheapest Insertion
 # ============================================================================
 
 print(f"{'='*80}")
-print("RUNNING CHEAPEST INSERTION ALGORITHM")
+print("RUNNING GLOBAL OPTIMIZATION (ALNS)")
 print(f"{'='*80}\n")
 
-# Calculate initial route metrics
-for route in routes:
-    route.total_distance = calculate_route_distance(route, G)
-    route.total_time = calculate_route_time(route, G)
-    print(f"{route.route_id}: {len(route.stops)} stops, {route.total_distance:.2f}km, {route.total_time:.2f}min")
+# Initialize solution state
+initial_sol = ServiceSolution(students, routes, G)
 
-print(f"\nAssigning {len(students)} permanent students...\n")
+# Run ALNS Optimizer
+optimizer = ALNSEngine(initial_sol, iterations=60)
+best_sol = optimizer.run()
 
-for student in students:
-    success, route, message = process_detour_request(
-        student, routes, G, 
-        detour_type='permanent'
-    )
-    
-    if success:
-        print(f"✓ {student.id}: {message}")
-        print(f"    Walk radius: {student.walk_radius}m, School stage: {student.school_stage.name}")
-    else:
-        student.failure_reason = message
-        print(f"✗ {student.id}: {message}")
+# Update the main students and routes objects with the best solution found
+students = best_sol.students
+routes = best_sol.routes
 
 # Recalculate route metrics after assignments
 print(f"\nRecalculating route metrics after assignments...")

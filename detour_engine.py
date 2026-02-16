@@ -13,8 +13,137 @@ import networkx as nx
 import osmnx as ox
 import math
 import heapq
+import time
 from shapely.geometry import Point, LineString
 from shapely.ops import substring
+
+
+# ============================================================================
+# WALKING DISTANCE AND PENALTY CALCULATIONS
+# ============================================================================
+
+# Cached undirected graph for pedestrian walking (ignores one-way, U-turn rules)
+_WALK_GRAPH = None
+# Cache: (student_node, stop_node) -> walk_distance_meters
+_WALK_DIST_CACHE = {}
+# Cache: (lat, lon) -> nearest_graph_node for walking
+_STUDENT_NODE_CACHE = {}
+
+def _get_walk_graph(graph):
+    """Get or create an undirected version of the road graph for walking.
+    Pedestrians can walk on any road regardless of direction.
+    Cached after first creation."""
+    global _WALK_GRAPH
+    if _WALK_GRAPH is None:
+        _WALK_GRAPH = graph.to_undirected()
+    return _WALK_GRAPH
+
+
+def haversine_walk_distance(lat1, lon1, lat2, lon2):
+    """Calculate straight-line distance in meters (for quick estimates only)."""
+    R = 6371000  # Earth radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+def walk_distance_on_roads(graph, node_a, node_b):
+    """Calculate walking distance along roads (undirected) between two nodes.
+    Ignores one-way restrictions and U-turn rules since pedestrians use sidewalks.
+    Results are cached for fast repeated lookups during ALNS.
+    
+    Returns:
+        float: distance in meters, or float('inf') if no path exists
+    """
+    if node_a == node_b:
+        return 0.0
+    cache_key = (node_a, node_b)
+    if cache_key in _WALK_DIST_CACHE:
+        return _WALK_DIST_CACHE[cache_key]
+    walk_g = _get_walk_graph(graph)
+    try:
+        dist = nx.shortest_path_length(walk_g, node_a, node_b, weight='length')
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        dist = float('inf')
+    _WALK_DIST_CACHE[cache_key] = dist
+    _WALK_DIST_CACHE[(node_b, node_a)] = dist  # Symmetric
+    return dist
+
+
+def walk_path_on_roads(graph, node_a, node_b):
+    """Find the walking path along roads (undirected) between two nodes.
+    Returns the list of node IDs along the path.
+    
+    Returns:
+        list: path node IDs, or empty list if no path exists
+    """
+    if node_a == node_b:
+        return [node_a]
+    walk_g = _get_walk_graph(graph)
+    try:
+        return nx.shortest_path(walk_g, node_a, node_b, weight='length')
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return []
+
+
+def get_walk_absolute_max(walk_radius):
+    """Get the absolute maximum walk distance based on student stage.
+    - ELEMENTARY/KG (0m recommended): 150m emergency max
+    - MIDDLE (100m recommended): 300m absolute max
+    - HIGH (200m recommended): 500m absolute max
+    """
+    if walk_radius == 0:
+        return 150
+    return min(walk_radius * 3, 500)
+
+
+def calculate_walk_penalty(student, stop_node, graph):
+    """Calculate a soft penalty for walking beyond the recommended radius.
+    Uses straight-line (haversine) distance for fast O(1) evaluation during ALNS.
+    Road-network walking paths are only computed for visualization (see walk_path_on_roads).
+    
+    Returns:
+        (penalty_minutes, actual_walk_m, is_over_limit)
+        - penalty_minutes: float, time penalty to add to objective
+        - actual_walk_m: float, straight-line walking distance in meters
+        - is_over_limit: bool, True if walk exceeds recommended radius
+    """
+    student_lat, student_lon = student.coords
+    
+    try:
+        stop_lat = graph.nodes[stop_node]['y']
+        stop_lon = graph.nodes[stop_node]['x']
+    except (KeyError, TypeError):
+        return 0.0, 0.0, False
+    
+    # Haversine: O(1) math, called thousands of times during ALNS
+    actual_walk_m = haversine_walk_distance(student_lat, student_lon, stop_lat, stop_lon)
+    
+    recommended_radius = student.walk_radius
+    absolute_max = get_walk_absolute_max(recommended_radius)
+    
+    # Within recommended radius - no penalty
+    if actual_walk_m <= recommended_radius:
+        return 0.0, actual_walk_m, False
+    
+    # Beyond absolute maximum - reject
+    if actual_walk_m > absolute_max:
+        return float('inf'), actual_walk_m, True
+    
+    # Between recommended and absolute max - escalating penalty
+    excess_m = actual_walk_m - recommended_radius
+    if recommended_radius > 0:
+        ratio = excess_m / recommended_radius  # 0.0 to 2.0
+    else:
+        ratio = excess_m / 50.0  # Normalize against 50m baseline for elementary
+    
+    # 2 minutes penalty per ratio unit
+    penalty_minutes = ratio * 2.0
+    return penalty_minutes, actual_walk_m, True
 
 
 def get_turn_penalty(bearing1, bearing2):
@@ -80,39 +209,93 @@ def calculate_weighted_path_time(graph, path_nodes):
 
 # Global cache for shortest paths to speed up iterations
 _path_cache = {}
+_MATRIX_CACHE = {}       # (source, target) -> travel_time in minutes
+_MATRIX_CACHE_LENGTH = {} # (source, target) -> length in meters
+
+def get_heuristic_time(u, v, graph, max_speed_kmh=80):
+    """Admissible heuristic for time-based A*: straight line distance / max speed."""
+    node_u = graph.nodes[u]
+    node_v = graph.nodes[v]
+    # Haversine distance in meters
+    lat1, lon1 = node_u['y'], node_u['x']
+    lat2, lon2 = node_v['y'], node_v['x']
+    
+    # Simple Haversine approx
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+    dist_m = 2 * 6371000 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    
+    # Max speed in meters per minute (80km/h conservative max)
+    max_meters_per_min = (max_speed_kmh * 1000) / 60
+    return dist_m / max_meters_per_min
+
+
+def _reconstruct_path(came_from, source, target_state):
+    """Reconstruct path from predecessor map."""
+    path = []
+    state = target_state
+    while state is not None:
+        node = state[0]
+        path.append(node)
+        state = came_from.get(state)
+    path.reverse()
+    return path
+
 
 def find_shortest_path_with_turns(graph, source, target, weight='travel_time', initial_bearing=None):
     """Find the shortest path while making U-turns effectively illegal.
     
-    Uses a custom Dijkstra where the state is (node, incoming_bearing).
+    Uses a custom A* search where the state is (node, incoming_bearing).
     This prevents 180-degree turns and applies minor penalties for 90-degree turns.
+    Uses a predecessor map instead of storing full paths on the heap for speed.
     """
     if source == target:
         return [source], 0.0
 
     # Cache key: (source, target, rounded_bearing)
     cache_key = (source, target, round(initial_bearing, 1) if initial_bearing is not None else None)
+    
+    # Check _path_cache FIRST (has both path AND time — needed by path-dependent functions)
     if cache_key in _path_cache:
         return _path_cache[cache_key]
 
-    # distances[(node, prev_bearing)] = current_best_time
-    # Use a small epsilon for bearing comparison to avoid precision issues
+    # Fallback: _MATRIX_CACHE has time only (no path). Used for time-only lookups.
+    if initial_bearing is None and (source, target) in _MATRIX_CACHE:
+        return None, _MATRIX_CACHE[(source, target)]
+
     distances = {}
+    came_from = {}  # state -> parent_state (predecessor map)
     
-    # (time, current_node, prev_bearing, path)
-    pq = [(0.0, source, initial_bearing, [source])]
+    initial_brg_key = round(initial_bearing, 2) if initial_bearing is not None else None
+    start_state = (source, initial_brg_key)
+    
+    # Counter for stable heap ordering (avoids comparing tuples with None)
+    counter = 0
+    
+    # (estimated_total_time, counter, actual_time, current_node, prev_bearing_key)
+    h = get_heuristic_time(source, target, graph)
+    pq = [(h, counter, 0.0, source, initial_bearing)]
+    came_from[start_state] = None
+    distances[start_state] = 0.0
     
     while pq:
-        (current_time, current_node, prev_bearing, path) = heapq.heappop(pq)
+        (est_total, _, current_time, current_node, prev_bearing) = heapq.heappop(pq)
+        
+        state = (current_node, round(prev_bearing, 2) if prev_bearing is not None else None)
         
         if current_node == target:
+            # Reconstruct path from predecessor map
+            path = _reconstruct_path(came_from, source, state)
+            # Store in both caches
             _path_cache[cache_key] = (path, current_time)
+            if initial_bearing is None:
+                _MATRIX_CACHE[(source, target)] = current_time
             return path, current_time
             
-        state = (current_node, round(prev_bearing, 2) if prev_bearing is not None else None)
-        if state in distances and distances[state] <= current_time:
+        if state in distances and distances[state] < current_time:
             continue
-        distances[state] = current_time
         
         if current_node not in graph:
             continue
@@ -123,30 +306,147 @@ def find_shortest_path_with_turns(graph, source, target, weight='travel_time', i
                 cost = data.get(weight, 0)
                 current_bearing = data.get('bearing')
                 
-                # IMPORTANT: If the edge has no bearing, we can't do turn penalties
-                # But OSMnx add_edge_bearings usually ensures it's there.
-                
                 penalty = get_turn_penalty(prev_bearing, current_bearing)
-                
-                # If penalty is massive (> 1000), it's an illegal 180-degree turn
                 if penalty > 1000:
                     continue
                     
                 new_time = current_time + cost + penalty
-                # Handle None bearing gracefully
                 bearing_key = round(current_bearing, 2) if current_bearing is not None else None
                 new_state = (neighbor, bearing_key)
                 
                 if new_state not in distances or distances[new_state] > new_time:
-                    heapq.heappush(pq, (new_time, neighbor, current_bearing, path + [neighbor]))
-                
+                    distances[new_state] = new_time
+                    came_from[new_state] = state
+                    h_neighbor = get_heuristic_time(neighbor, target, graph)
+                    counter += 1
+                    heapq.heappush(pq, (new_time + h_neighbor, counter, new_time, neighbor, current_bearing))
+    
+    # CACHE NEGATIVE RESULTS — prevents re-running expensive exhaustive searches
+    _path_cache[cache_key] = (None, float('inf'))
+    if initial_bearing is None:
+        _MATRIX_CACHE[(source, target)] = float('inf')
     return None, float('inf')
 
 
+def precalculate_distance_matrix(graph, critical_node_ids):
+    """Pre-calculate path times AND distances between all critical nodes.
+    Uses A* with 180-turn illegal logic. Fills both _MATRIX_CACHE (time)
+    and _MATRIX_CACHE_LENGTH (distance) and _path_cache (path+time).
+    """
+    total = len(critical_node_ids) * (len(critical_node_ids) - 1)
+    print(f"Pre-calculating distance matrix for {len(critical_node_ids)} nodes ({total} pairs)...")
+    
+    count = 0
+    start_time = time.time()
+    
+    for start_node in critical_node_ids:
+        for end_node in critical_node_ids:
+            if start_node == end_node:
+                continue
+            
+            # This fills _path_cache and _MATRIX_CACHE with time data
+            path, t = find_shortest_path_with_turns(graph, start_node, end_node)
+            
+            # Also compute length from the path to fill _MATRIX_CACHE_LENGTH
+            if path and t < float('inf'):
+                dist_m = 0.0
+                for pi in range(len(path) - 1):
+                    ed = graph.get_edge_data(path[pi], path[pi+1])
+                    if ed:
+                        d = ed[0] if 0 in ed else list(ed.values())[0]
+                        dist_m += d.get('length', 0)
+                _MATRIX_CACHE_LENGTH[(start_node, end_node)] = dist_m
+            else:
+                _MATRIX_CACHE_LENGTH[(start_node, end_node)] = float('inf')
+            
+            count += 1
+            if count % 200 == 0:
+                elapsed = time.time() - start_time
+                print(f"  Processed {count}/{total} pairs... ({elapsed:.1f}s)")
+    
+    print(f"Pre-calculation complete. Matrix entries: {len(_MATRIX_CACHE)}, Length entries: {len(_MATRIX_CACHE_LENGTH)}")
+
+
 def shortest_path_length_with_turns(graph, source, target, weight='travel_time', initial_bearing=None):
-    """Helper to get only the time from the turn-aware search."""
-    _, time = find_shortest_path_with_turns(graph, source, target, weight=weight, initial_bearing=initial_bearing)
-    return time
+    """Fast lookup from Matrix Cache if available, else run A*."""
+    if initial_bearing is None:
+        if weight == 'length' and (source, target) in _MATRIX_CACHE_LENGTH:
+            return _MATRIX_CACHE_LENGTH[(source, target)]
+        if weight == 'travel_time' and (source, target) in _MATRIX_CACHE:
+            return _MATRIX_CACHE[(source, target)]
+        
+    _, t = find_shortest_path_with_turns(graph, source, target, weight=weight, initial_bearing=initial_bearing)
+    return t
+
+
+def calculate_route_time_from_matrix(stops, graph=None):
+    """Ultra-fast route time using O(1) matrix lookups.
+    On cache miss: lazily computes the pair via A* and caches it.
+    No need for upfront all-pairs precomputation.
+    """
+    if len(stops) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(stops) - 1):
+        pair = (stops[i].node_id, stops[i+1].node_id)
+        if pair in _MATRIX_CACHE:
+            t = _MATRIX_CACHE[pair]
+            if t == float('inf'):
+                return 9999.0
+            total += t
+        elif graph is not None:
+            # Lazy compute: run A* once, result is cached for future lookups
+            path, t = find_shortest_path_with_turns(graph, pair[0], pair[1])
+            if t == float('inf'):
+                return 9999.0
+            # Also compute length while we have the path
+            if path:
+                dist_m = 0.0
+                for pi in range(len(path) - 1):
+                    ed = graph.get_edge_data(path[pi], path[pi+1])
+                    if ed:
+                        d = ed[0] if 0 in ed else list(ed.values())[0]
+                        dist_m += d.get('length', 0)
+                _MATRIX_CACHE_LENGTH[pair] = dist_m
+            total += t
+        else:
+            return None  # No graph provided, can't compute
+    return total
+
+
+def calculate_route_distance_from_matrix(stops, graph=None):
+    """Ultra-fast route distance using O(1) matrix lookups.
+    On cache miss: lazily computes the pair via A* and caches it.
+    Returns distance in kilometers.
+    """
+    if len(stops) < 2:
+        return 0.0
+    total_m = 0.0
+    for i in range(len(stops) - 1):
+        pair = (stops[i].node_id, stops[i+1].node_id)
+        if pair in _MATRIX_CACHE_LENGTH:
+            d = _MATRIX_CACHE_LENGTH[pair]
+            if d == float('inf'):
+                return 0.0
+            total_m += d
+        elif graph is not None:
+            # Lazy compute: run A* to get path, compute length from it
+            path, t = find_shortest_path_with_turns(graph, pair[0], pair[1])
+            if path and t < float('inf'):
+                dist_m = 0.0
+                for pi in range(len(path) - 1):
+                    ed = graph.get_edge_data(path[pi], path[pi+1])
+                    if ed:
+                        dd = ed[0] if 0 in ed else list(ed.values())[0]
+                        dist_m += dd.get('length', 0)
+                _MATRIX_CACHE_LENGTH[pair] = dist_m
+                total_m += dist_m
+            else:
+                _MATRIX_CACHE_LENGTH[pair] = float('inf')
+                return 0.0
+        else:
+            return None  # No graph provided
+    return total_m / 1000.0
 
 
 def get_bearing_of_path(graph, path):
@@ -348,6 +648,11 @@ def calculate_route_distance(route, graph):
     if len(route.stops) < 2:
         return 0.0
     
+    # Try fast matrix lookup first (lazy: computes on cache miss)
+    fast = calculate_route_distance_from_matrix(route.stops, graph)
+    if fast is not None:
+        return fast
+    
     total_distance_m = 0
     
     # Sum distances between consecutive stops
@@ -355,15 +660,21 @@ def calculate_route_distance(route, graph):
         from_node = route.stops[i].node_id
         to_node = route.stops[i + 1].node_id
         
+        # Check length matrix
+        if (from_node, to_node) in _MATRIX_CACHE_LENGTH:
+            d = _MATRIX_CACHE_LENGTH[(from_node, to_node)]
+            if d < float('inf'):
+                total_distance_m += d
+            continue
+        
         try:
             # Use shortest path in terms of distance (turn-aware)
-            time_with_turns = shortest_path_length_with_turns(
+            dist_val = shortest_path_length_with_turns(
                 graph, from_node, to_node, weight='length'
             )
-            if time_with_turns < 1000000: # Check if path exists
-                total_distance_m += time_with_turns
+            if dist_val < 1000000:
+                total_distance_m += dist_val
         except Exception:
-            # If no path exists, log warning
             print(f"Warning: No path between stops {from_node} and {to_node}")
             continue
     
@@ -485,9 +796,21 @@ def calculate_student_ride_time_potential(route, new_stop, insert_position, grap
         
     ride_time = 0.0
     for i in range(first_idx, len(temp_stops) - 1):
-        path, time_minutes = find_shortest_path_with_turns(graph, temp_stops[i].node_id, temp_stops[i+1].node_id)
-        if path:
-            ride_time += time_minutes
+        u = temp_stops[i].node_id
+        v = temp_stops[i+1].node_id
+        # Fast matrix lookup first
+        if (u, v) in _MATRIX_CACHE:
+            t = _MATRIX_CACHE[(u, v)]
+            if t == float('inf'):
+                return 9999.0
+            ride_time += t
+        else:
+            # Fallback to graph search
+            path, time_minutes = find_shortest_path_with_turns(graph, u, v)
+            if time_minutes < float('inf'):
+                ride_time += time_minutes
+            else:
+                return 9999.0
     return ride_time
 
 
@@ -689,8 +1012,70 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
             if node_id not in candidate_node_ids:
                 candidate_node_ids.append(node_id)
     
-    # To keep it efficient, we'll only check up to 5 best candidate nodes
-    candidate_node_ids = candidate_node_ids[:5]
+    # 3. Bus-reachable fallback: If frontage is unreachable by bus (one-way / U-turn),
+    #    find nearby graph nodes that ARE bus-reachable and within a reasonable walk.
+    #    This handles cases where the student's street is one-way AWAY from school.
+    frontage_reachable = (
+        _MATRIX_CACHE.get((frontage_node_id, existing_routes[0].stops[0].node_id if existing_routes else None), float('inf')) < float('inf')
+        and _MATRIX_CACHE.get((existing_routes[0].stops[0].node_id if existing_routes else None, frontage_node_id), float('inf')) < float('inf')
+    ) if existing_routes else True
+    
+    if not frontage_reachable:
+        # Find nearest graph nodes that the bus CAN reach via bidirectional BFS
+        # (walking is not constrained by one-way streets)
+        lat, lon = new_student.coords
+        try:
+            center_node = ox.nearest_nodes(graph, lon, lat)
+            visited = set()
+            bfs_queue = [(center_node, 0)]
+            reachable_candidates = []
+            max_walk = get_walk_absolute_max(walk_limit)  # Stage-based absolute max
+            school_node = existing_routes[0].stops[0].node_id
+            while bfs_queue and len(reachable_candidates) < 10:
+                node, dist = bfs_queue.pop(0)
+                if node in visited or dist > max_walk:
+                    continue
+                visited.add(node)
+                to_school = _MATRIX_CACHE.get((node, school_node), float('inf'))
+                from_school = _MATRIX_CACHE.get((school_node, node), float('inf'))
+                if to_school < float('inf') and from_school < float('inf'):
+                    reachable_candidates.append((node, dist))
+                # Expand along out-edges
+                for neighbor in graph.successors(node):
+                    ed = graph.get_edge_data(node, neighbor)
+                    if ed:
+                        d = ed[0] if 0 in ed else list(ed.values())[0]
+                        new_dist = dist + d.get('length', 0)
+                        if new_dist <= max_walk:
+                            bfs_queue.append((neighbor, new_dist))
+                # Also expand along in-edges (walking is bidirectional)
+                for predecessor in graph.predecessors(node):
+                    ed = graph.get_edge_data(predecessor, node)
+                    if ed:
+                        d = ed[0] if 0 in ed else list(ed.values())[0]
+                        new_dist = dist + d.get('length', 0)
+                        if new_dist <= max_walk:
+                            bfs_queue.append((predecessor, new_dist))
+            
+            for node_id, dist in sorted(reachable_candidates, key=lambda x: x[1]):
+                if node_id not in candidate_node_ids:
+                    candidate_node_ids.append(node_id)
+        except Exception:
+            pass
+    
+    # To keep it efficient, we'll only check up to 8 best candidate nodes
+    candidate_node_ids = candidate_node_ids[:8]
+    
+    # Pre-filter: skip candidates not known to be bus-reachable (avoids cold A* calls)
+    if existing_routes:
+        school_node = existing_routes[0].stops[0].node_id
+        filtered = []
+        for cid in candidate_node_ids:
+            to_s = _MATRIX_CACHE.get((cid, school_node), None)
+            from_s = _MATRIX_CACHE.get((school_node, cid), None)
+            if to_s is not None and from_s is not None and to_s < float('inf') and from_s < float('inf'):
+                filtered.append(cid)
+        candidate_node_ids = filtered if filtered else candidate_node_ids  # Fallback if nothing passes
     
     for route in existing_routes:
 
@@ -749,13 +1134,23 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
                     if not valid:
                         continue
                 
-                # Track best option
-                if delta_time < best_cost:
-                    best_cost = delta_time
+                # Calculate walk penalty (straight-line distance)
+                walk_penalty, walk_m, over_limit = calculate_walk_penalty(
+                    new_student, node_id, graph
+                )
+                if walk_penalty == float('inf'):
+                    continue  # Beyond absolute walk maximum
+                
+                # Total cost = bus insertion time + walk penalty
+                total_cost = delta_time + walk_penalty
+                
+                # Track best option (penalized cost for comparison)
+                if total_cost < best_cost:
+                    best_cost = total_cost
                     best_route = route
                     best_position = position
                     best_stop = eval_stop
-                    best_reason = f"Cost: {delta_time:.2f} min, {constraint_reason}"
+                    best_reason = f"Cost: {delta_time:.2f} min + walk penalty {walk_penalty:.1f} min (walk {walk_m:.0f}m), {constraint_reason}"
     
     # Return result
     if best_route is not None:

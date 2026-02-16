@@ -25,7 +25,7 @@
     {
       "id": "BUS_2",
       "type": "Large",
-      "capacity": 45,
+      "capacity": 90,
       "fixed_cost": 80.0,
       "variable_cost_per_km": 7.0
     }
@@ -34,7 +34,7 @@
     {
       "route_id": "R1",
       "bus_type": "Small",
-      "max_trip_time_minutes": 30,
+      "max_trip_time_minutes": 90,
       "stops": [
         {
           "stop_id": "R1-Stop-0",
@@ -46,6 +46,66 @@
         },
         {
           "stop_id": "R1-Stop-1",
+          "latitude": 29.960181015184613,
+          "longitude": 31.26997478936844,
+          "node_id": 9992996016131269820,
+          "student_count": 1,
+          "student_ids": [
+            "S6"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-2",
+          "latitude": 29.958652751946577,
+          "longitude": 31.276961091398704,
+          "node_id": 9992995850631276834,
+          "student_count": 1,
+          "student_ids": [
+            "S1"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-3",
+          "latitude": 29.95519319138084,
+          "longitude": 31.27485149216989,
+          "node_id": 9992995500031275000,
+          "student_count": 1,
+          "student_ids": [
+            "S4"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-4",
+          "latitude": 29.97032826639092,
+          "longitude": 31.289354095085812,
+          "node_id": 9992997000031290000,
+          "student_count": 1,
+          "student_ids": [
+            "S2"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-5",
+          "latitude": 29.9643587,
+          "longitude": 31.2832899,
+          "node_id": 9657861136,
+          "student_count": 1,
+          "student_ids": [
+            "S5"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-6",
+          "latitude": 29.9799007,
+          "longitude": 31.2704775,
+          "node_id": 6304086264,
+          "student_count": 1,
+          "student_ids": [
+            "S3"
+          ]
+        },
+        {
+          "stop_id": "R1-Stop-7",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -53,14 +113,14 @@
           "student_ids": []
         }
       ],
-      "total_distance_km": 0.0,
-      "total_time_minutes": 0.0,
-      "profit_margin": 0
+      "total_distance_km": 16.120412568133062,
+      "total_time_minutes": 74.45246066106556,
+      "profit_margin": 0.8107216480570067
     },
     {
       "route_id": "R2",
       "bus_type": "Large",
-      "max_trip_time_minutes": 75,
+      "max_trip_time_minutes": 90,
       "stops": [
         {
           "stop_id": "R2-Stop-0",
@@ -72,56 +132,6 @@
         },
         {
           "stop_id": "R2-Stop-1",
-          "latitude": 29.960181015184613,
-          "longitude": 31.26997478936844,
-          "node_id": 9992996016131269820,
-          "student_count": 1,
-          "student_ids": [
-            "S6"
-          ]
-        },
-        {
-          "stop_id": "R2-Stop-2",
-          "latitude": 29.958652751946577,
-          "longitude": 31.276961091398704,
-          "node_id": 9992995850631276834,
-          "student_count": 1,
-          "student_ids": [
-            "S1"
-          ]
-        },
-        {
-          "stop_id": "R2-Stop-3",
-          "latitude": 29.95519319138084,
-          "longitude": 31.27485149216989,
-          "node_id": 9992995500031275000,
-          "student_count": 1,
-          "student_ids": [
-            "S4"
-          ]
-        },
-        {
-          "stop_id": "R2-Stop-4",
-          "latitude": 29.97032826639092,
-          "longitude": 31.289354095085812,
-          "node_id": 9992997000031290000,
-          "student_count": 1,
-          "student_ids": [
-            "S2"
-          ]
-        },
-        {
-          "stop_id": "R2-Stop-5",
-          "latitude": 29.9799007,
-          "longitude": 31.2704775,
-          "node_id": 6304086264,
-          "student_count": 1,
-          "student_ids": [
-            "S3"
-          ]
-        },
-        {
-          "stop_id": "R2-Stop-6",
           "latitude": 29.9644413,
           "longitude": 31.270124,
           "node_id": 2208869932,
@@ -129,9 +139,9 @@
           "student_ids": []
         }
       ],
-      "total_distance_km": 0.07183927752538957,
-      "total_time_minutes": 74.53998096276115,
-      "profit_margin": 0.8587668860654777
+      "total_distance_km": 0.0,
+      "total_time_minutes": 0.0,
+      "profit_margin": 0
     }
   ],
   "assigned_students": [
@@ -143,7 +153,7 @@
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R2"
+      "assigned_route": "R1"
     },
     {
       "id": "S2",
@@ -153,7 +163,7 @@
       "school_stage": "MIDDLE",
       "walk_radius_m": 100,
       "fee": 120.0,
-      "assigned_route": "R2"
+      "assigned_route": "R1"
     },
     {
       "id": "S3",
@@ -163,7 +173,7 @@
       "school_stage": "HIGH",
       "walk_radius_m": 200,
       "fee": 150.0,
-      "assigned_route": "R2"
+      "assigned_route": "R1"
     },
     {
       "id": "S4",
@@ -173,7 +183,7 @@
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R2"
+      "assigned_route": "R1"
     },
     {
       "id": "S5",
@@ -183,7 +193,7 @@
       "school_stage": "MIDDLE",
       "walk_radius_m": 100,
       "fee": 120.0,
-      "assigned_route": null
+      "assigned_route": "R1"
     },
     {
       "id": "S6",
@@ -193,7 +203,7 @@
       "school_stage": "ELEMENTARY",
       "walk_radius_m": 0,
       "fee": 100.0,
-      "assigned_route": "R2"
+      "assigned_route": "R1"
     }
   ],
   "constraints": {}

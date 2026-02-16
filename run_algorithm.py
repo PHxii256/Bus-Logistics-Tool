@@ -74,24 +74,146 @@ students, buses, routes, school_coords, config = setup_algorithm_inputs('input_d
 
 # Print summary
 print_input_summary(students, buses, routes, school_coords)
-# Pre-snap all students to the graph to save time during optimization
-print("\n[Optimization] Pre-snapping students to road network...")
-from detour_engine import snap_address_to_edge
-for s in students:
-    snap_address_to_edge(s.coords, G)
-print("Pre-snap complete.")
+
 # ============================================================================
-# ALGORITHM: Assign permanent students using Cheapest Insertion
+# ALGORITHM: GLOBAL OPTIMIZATION (ALNS)
 # ============================================================================
 
 print(f"{'='*80}")
 print("RUNNING GLOBAL OPTIMIZATION (ALNS)")
 print(f"{'='*80}\n")
 
+# Pre-snap students and collect critical nodes for Distance Matrix priming
+print("[Optimization] Preparing road network for large-scale routing...")
+from detour_engine import snap_address_to_edge, precalculate_distance_matrix, find_safe_nodes_within_radius, _MATRIX_CACHE
+critical_nodes = set()
+student_frontages = {}
+for s in students:
+    node_id, _ = snap_address_to_edge(s.coords, G)
+    critical_nodes.add(node_id)
+    student_frontages[s.id] = node_id
+    # Include walk-radius candidate nodes for MIDDLE/HIGH students
+    if s.walk_radius > 0:
+        safe_nodes = find_safe_nodes_within_radius(s.coords, G, 500, s.walk_radius)
+        for safe_node_id, _ in sorted(safe_nodes, key=lambda x: x[1])[:5]:
+            critical_nodes.add(safe_node_id)
+
+school_node = None
+for route in routes:
+    for stop in route.stops:
+        critical_nodes.add(stop.node_id)
+        if school_node is None:
+            school_node = stop.node_id
+
+# Phase 1: Build initial matrix
+print(f"[Optimization] {len(critical_nodes)} critical nodes (incl. walk candidates)")
+precalculate_distance_matrix(G, list(critical_nodes))
+
+# Phase 2: For students whose frontage is unreachable by bus, find nearby 
+# bus-reachable nodes and add them to the matrix
+from detour_engine import find_shortest_path_with_turns, _MATRIX_CACHE_LENGTH, _path_cache
+extra_reachable_nodes = set()
+for s in students:
+    fnode = student_frontages[s.id]
+    to_school = _MATRIX_CACHE.get((fnode, school_node), float('inf'))
+    from_school = _MATRIX_CACHE.get((school_node, fnode), float('inf'))
+    if to_school == float('inf') or from_school == float('inf'):
+        print(f"[Optimization] {s.id} ({s.school_stage.name}) frontage unreachable, expanding search...")
+        lat, lon = s.coords
+        center_node = ox.nearest_nodes(G, lon, lat)
+        # Absolute max walk based on student stage
+        from detour_engine import get_walk_absolute_max
+        max_walk = get_walk_absolute_max(s.walk_radius)
+        print(f"  Recommended: {s.walk_radius}m, Absolute max: {max_walk}m")
+        visited = set()
+        bfs_queue = [(center_node, 0)]
+        bfs_candidates = []  # (node, walk_dist)
+        while bfs_queue:
+            node, dist = bfs_queue.pop(0)
+            if node in visited or dist > max_walk:
+                continue
+            visited.add(node)
+            # Check if already in matrix and reachable
+            ts = _MATRIX_CACHE.get((node, school_node), float('inf'))
+            fs = _MATRIX_CACHE.get((school_node, node), float('inf'))
+            if ts < float('inf') and fs < float('inf'):
+                bfs_candidates.append((node, dist, True))  # already known reachable
+            elif node not in critical_nodes:
+                bfs_candidates.append((node, dist, False))  # needs A* check
+            # Expand bidirectionally (walking ignores one-way)
+            for neighbor in G.successors(node):
+                ed = G.get_edge_data(node, neighbor)
+                if ed:
+                    d = ed[0] if 0 in ed else list(ed.values())[0]
+                    new_dist = dist + d.get('length', 0)
+                    if new_dist <= max_walk:
+                        bfs_queue.append((neighbor, new_dist))
+            for predecessor in G.predecessors(node):
+                ed = G.get_edge_data(predecessor, node)
+                if ed:
+                    d = ed[0] if 0 in ed else list(ed.values())[0]
+                    new_dist = dist + d.get('length', 0)
+                    if new_dist <= max_walk:
+                        bfs_queue.append((predecessor, new_dist))
+        
+        # Sort by walk distance, then check school-reachability for unknown nodes
+        bfs_candidates.sort(key=lambda x: x[1])
+        found_count = 0
+        for node, dist, already_known in bfs_candidates:
+            if found_count >= 5:  # Limit to 5 reachable fallback nodes
+                break
+            if already_known:
+                print(f"  Reachable node {node} at {dist:.0f}m walk (already in matrix)")
+                extra_reachable_nodes.add(node)
+                found_count += 1
+            else:
+                # Quick A* check: school->node and node->school only
+                path_to, t_to = find_shortest_path_with_turns(G, school_node, node)
+                path_from, t_from = find_shortest_path_with_turns(G, node, school_node)
+                if t_to < float('inf') and t_from < float('inf'):
+                    print(f"  Reachable node {node} at {dist:.0f}m walk (school->{t_to:.1f}min, ->school={t_from:.1f}min)")
+                    extra_reachable_nodes.add(node)
+                    found_count += 1
+        if found_count == 0:
+            print(f"  WARNING: No bus-reachable nodes found within {max_walk}m walk!")
+
+# Register fallback nodes and precompute ONLY their pairs with existing critical nodes
+if extra_reachable_nodes:
+    new_nodes = extra_reachable_nodes - critical_nodes
+    if new_nodes:
+        # Targeted precomputation: only fallback↔critical pairs (not all-to-all again)
+        pairs_to_compute = []
+        for fn in new_nodes:
+            for cn in critical_nodes:
+                pairs_to_compute.append((fn, cn))
+                pairs_to_compute.append((cn, fn))
+        print(f"[Optimization] Pre-computing {len(pairs_to_compute)} pairs for {len(new_nodes)} fallback nodes...")
+        import time as _t
+        _start = _t.time()
+        for src, dst in pairs_to_compute:
+            find_shortest_path_with_turns(G, src, dst)
+            # Also compute length from path
+            cache_key = (src, dst, None)
+            if cache_key in _path_cache:
+                path, t = _path_cache[cache_key]
+                if path and t < float('inf'):
+                    dist_m = 0.0
+                    for pi in range(len(path) - 1):
+                        ed = G.get_edge_data(path[pi], path[pi+1])
+                        if ed:
+                            d = ed[0] if 0 in ed else list(ed.values())[0]
+                            dist_m += d.get('length', 0)
+                    _MATRIX_CACHE_LENGTH[(src, dst)] = dist_m
+                else:
+                    _MATRIX_CACHE_LENGTH[(src, dst)] = float('inf')
+        _elapsed = _t.time() - _start
+        print(f"  Done in {_elapsed:.1f}s ({len(pairs_to_compute)} pairs)")
+        critical_nodes |= new_nodes
+
 # Initialize solution state
 initial_sol = ServiceSolution(students, routes, G)
 
-# Run ALNS Optimizer
+# Run ALNS Optimizer (ALWAYS RUN WITH 60 ITTERATIONS OR LESS)
 optimizer = ALNSEngine(initial_sol, iterations=60)
 best_sol = optimizer.run()
 

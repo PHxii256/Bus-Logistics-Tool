@@ -10,7 +10,11 @@ from detour_engine import (
     calculate_stops_time,
     calculate_insertion_cost,
     validate_permanent_student,
-    snap_address_to_edge
+    snap_address_to_edge,
+    calculate_route_time_from_matrix,
+    calculate_route_distance_from_matrix,
+    calculate_walk_penalty,
+    get_walk_absolute_max
 )
 from entities import Stop
 
@@ -58,7 +62,10 @@ def worst_cost_removal(solution, n):
             if len(current_stop.students) <= 1:
                 temp_stops.remove(current_stop)
             
-            new_time = calculate_stops_time(temp_stops, solution.graph)
+            # Use fast matrix lookup (lazy: computes on cache miss)
+            new_time = calculate_route_time_from_matrix(temp_stops, solution.graph)
+            if new_time is None:
+                new_time = calculate_stops_time(temp_stops, solution.graph)
             delta_time = old_time - new_time
             removal_candidates.append((student, delta_time))
     
@@ -84,9 +91,11 @@ def _remove_student_from_solution(solution, student):
     if len(stop.students) == 0:
         route.stops.remove(stop)
         
-    # Update route metrics after removal
-    route.total_time = calculate_route_time(route, solution.graph)
-    route.total_distance = calculate_route_distance(route, solution.graph)
+    # Update route metrics after removal (lazy matrix lookup)
+    fast_time = calculate_route_time_from_matrix(route.stops, solution.graph)
+    route.total_time = fast_time if fast_time is not None else calculate_route_time(route, solution.graph)
+    fast_dist = calculate_route_distance_from_matrix(route.stops, solution.graph)
+    route.total_distance = fast_dist if fast_dist is not None else calculate_route_distance(route, solution.graph)
 
 
 # ============================================================================
@@ -171,35 +180,121 @@ def regret_repair(solution, k=2):
         else:
             break
 
+# Cache candidate nodes per student (BFS + safe_nodes don't change between iterations)
+_student_candidate_cache = {}  # student_id -> list of (node_id, coords)
+
 def _get_insertions_for_route(student, route, graph, frontage_info):
-    """Helper to find all possible valid insertion points for a student in ONE route."""
+    """Helper to find all possible valid insertion points for a student in ONE route.
+    Tries both the frontage node AND walk/reachability candidates.
+    """
+    from detour_engine import _MATRIX_CACHE
     options = []
     frontage_node_id, frontage_coords = frontage_info
+    
+    # Use cached candidates if available (graph doesn't change between iterations)
+    if student.id in _student_candidate_cache:
+        candidate_nodes = _student_candidate_cache[student.id]
+    else:
+        # Build candidate list: frontage node + walk candidates (if applicable)
+        candidate_nodes = [(frontage_node_id, frontage_coords)]
+        
+        if student.walk_radius > 0:
+            from detour_engine import find_safe_nodes_within_radius
+            safe_nodes = find_safe_nodes_within_radius(student.coords, graph, 500, student.walk_radius)
+            for node_id, dist in sorted(safe_nodes, key=lambda x: x[1]):
+                if node_id != frontage_node_id:
+                    coords = (graph.nodes[node_id]['y'], graph.nodes[node_id]['x'])
+                    candidate_nodes.append((node_id, coords))
+        
+        # Bus-reachable fallback: if frontage is unreachable, find nearby reachable nodes
+        # via bidirectional BFS (walking ignores one-way constraints)
+        school_node = route.stops[0].node_id if route.stops else None
+        if school_node:
+            to_school = _MATRIX_CACHE.get((frontage_node_id, school_node), float('inf'))
+            from_school = _MATRIX_CACHE.get((school_node, frontage_node_id), float('inf'))
+            if to_school == float('inf') or from_school == float('inf'):
+                import osmnx as ox
+                lat, lon = student.coords
+                center_node = ox.nearest_nodes(graph, lon, lat)
+                max_walk = get_walk_absolute_max(student.walk_radius)  # Stage-based
+                visited = set()
+                bfs_queue = [(center_node, 0)]
+                while bfs_queue and len(candidate_nodes) < 10:
+                    node, dist = bfs_queue.pop(0)
+                    if node in visited or dist > max_walk:
+                        continue
+                    visited.add(node)
+                    ts = _MATRIX_CACHE.get((node, school_node), float('inf'))
+                    fs = _MATRIX_CACHE.get((school_node, node), float('inf'))
+                    if ts < float('inf') and fs < float('inf'):
+                        if not any(c[0] == node for c in candidate_nodes):
+                            coords = (graph.nodes[node]['y'], graph.nodes[node]['x'])
+                            candidate_nodes.append((node, coords))
+                    # Expand along out-edges
+                    for neighbor in graph.successors(node):
+                        ed = graph.get_edge_data(node, neighbor)
+                        if ed:
+                            d = ed[0] if 0 in ed else list(ed.values())[0]
+                            new_dist = dist + d.get('length', 0)
+                            if new_dist <= max_walk:
+                                bfs_queue.append((neighbor, new_dist))
+                    # Also expand along in-edges (walking is bidirectional)
+                    for predecessor in graph.predecessors(node):
+                        ed = graph.get_edge_data(predecessor, node)
+                        if ed:
+                            d = ed[0] if 0 in ed else list(ed.values())[0]
+                            new_dist = dist + d.get('length', 0)
+                            if new_dist <= max_walk:
+                                bfs_queue.append((predecessor, new_dist))
+        
+        candidate_nodes = candidate_nodes[:8]
+        _student_candidate_cache[student.id] = candidate_nodes
     
     # Start and end stops are fixed (Depot/School), strictly insert between
     start_pos = 1 if len(route.stops) >= 2 else 0
     end_pos = len(route.stops) if len(route.stops) >= 2 else len(route.stops) + 1
+    
+    # Pre-filter: only keep candidates with KNOWN bus-reachability (both directions in cache)
+    school_node = route.stops[0].node_id if route.stops else None
+    reachable_candidates = []
+    for cand_node_id, cand_coords in candidate_nodes:
+        if school_node:
+            to_s = _MATRIX_CACHE.get((cand_node_id, school_node), None)
+            from_s = _MATRIX_CACHE.get((school_node, cand_node_id), None)
+            # Skip if not in matrix at all (never precomputed) or known unreachable
+            if to_s is None or from_s is None or to_s == float('inf') or from_s == float('inf'):
+                continue
+        reachable_candidates.append((cand_node_id, cand_coords))
         
     for pos in range(start_pos, end_pos):
-        # Check if an existing stop at this node can be reused
-        existing_stop = next((s for s in route.stops if s.node_id == frontage_node_id), None)
-        eval_stop = existing_stop if existing_stop else Stop(frontage_node_id, frontage_coords[0], frontage_coords[1])
-        
-        res = calculate_insertion_cost(eval_stop, route, pos, graph)
-        if res is None: continue
-        
-        cost, is_valid, _ = res
-        if not is_valid: continue
-        
-        valid, _, _ = validate_permanent_student(eval_stop, route, pos, cost, graph)
-        if valid:
-            options.append({
-                'route': route,
-                'new_stop': eval_stop,
-                'insertion_position': pos,
-                'insertion_cost_minutes': cost,
-                'is_new_stop': existing_stop is None
-            })
+        for cand_node_id, cand_coords in reachable_candidates:
+            # Check if an existing stop at this node can be reused
+            existing_stop = next((s for s in route.stops if s.node_id == cand_node_id), None)
+            eval_stop = existing_stop if existing_stop else Stop(cand_node_id, cand_coords[0], cand_coords[1])
+            
+            res = calculate_insertion_cost(eval_stop, route, pos, graph)
+            if res is None: continue
+            
+            cost, is_valid, _ = res
+            if not is_valid: continue
+            
+            valid, _, _ = validate_permanent_student(eval_stop, route, pos, cost, graph)
+            if valid:
+                # Add walk penalty to insertion cost
+                walk_penalty, walk_m, over_limit = calculate_walk_penalty(
+                    student, cand_node_id, graph
+                )
+                if walk_penalty == float('inf'):
+                    continue  # Beyond absolute walk maximum
+                
+                penalized_cost = cost + walk_penalty
+                options.append({
+                    'route': route,
+                    'new_stop': eval_stop,
+                    'insertion_position': pos,
+                    'insertion_cost_minutes': penalized_cost,
+                    'is_new_stop': existing_stop is None
+                })
     return options
 
 def _get_all_valid_insertions(student, routes, graph):
@@ -219,8 +314,11 @@ def _apply_insertion(solution, student, result):
         route.stops.insert(result['insertion_position'], new_stop)
     
     new_stop.add_student(student)
-    route.total_time = calculate_route_time(route, solution.graph)
-    route.total_distance = calculate_route_distance(route, solution.graph)
+    # Lazy matrix lookup (computes A* on cache miss)
+    fast_time = calculate_route_time_from_matrix(route.stops, solution.graph)
+    route.total_time = fast_time if fast_time is not None else calculate_route_time(route, solution.graph)
+    fast_dist = calculate_route_distance_from_matrix(route.stops, solution.graph)
+    route.total_distance = fast_dist if fast_dist is not None else calculate_route_distance(route, solution.graph)
 
 
 # ============================================================================

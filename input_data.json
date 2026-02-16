@@ -16,7 +16,7 @@
     {
       "id": "BUS_2",
       "type": "Large",
-      "capacity": 45,
+      "capacity": 90,
       "fixed_cost": 80.0,
       "var_cost_km": 7.0
     }
@@ -75,8 +75,7 @@
     {
       "id": "R1",
       "bus_id": "BUS_1",
-      "route_tmax": 30,
-      "note": "if route_tmax is set to < 37.9 here the system will output 2 routes", 
+      "route_tmax": 90,
       "initial_stops": [
         {
           "latitude": 29.964406,
@@ -93,8 +92,7 @@
     {
       "id": "R2",
       "bus_id": "BUS_2",
-      "route_tmax": 75,
-      "note": "if route_tmax is set to 60 here the system will output only 1 route", 
+      "route_tmax": 90,
       "initial_stops": [
         {
           "latitude": 29.964406,

@@ -18,7 +18,10 @@ from geopy.extra.rate_limiter import RateLimiter
 from detour_engine import (
     calculate_student_ride_time, 
     calculate_route_path_and_stats,
-    find_shortest_path_with_turns
+    find_shortest_path_with_turns,
+    walk_distance_on_roads,
+    walk_path_on_roads,
+    calculate_walk_penalty
 )
 
 
@@ -263,39 +266,32 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             except:
                 pass
 
-            # Calculate Actual Walking Distance
-            walk_dist_m = 9999
-            try:
-                # Use a more robust starting node (frontage-biased)
-                u, v, k = ox.nearest_edges(G, student_obj.coords[1], student_obj.coords[0])
-                # Check both endpoints of the nearest edge and pick the one closer to the stop
-                d_u = nx.shortest_path_length(G, u, stop.node_id, weight='length')
-                d_v = nx.shortest_path_length(G, v, stop.node_id, weight='length')
-                walk_dist_m = min(d_u, d_v)
-            except:
-                # Fallback to nearest node if edge logic fails
-                try:
-                    s_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
-                    walk_dist_m = nx.shortest_path_length(G, s_node, stop.node_id, weight='length')
-                except:
-                    # Fallback to Haversine if no road path
-                    lat1, lon1 = student_obj.coords
-                lat2, lon2 = stop.coords
-                phi1, phi2 = math.radians(lat1), math.radians(lat2)
-                dphi = math.radians(lat2 - lat1)
-                dlambda = math.radians(lon2 - lon1)
-                a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
-                walk_dist_m = 2 * 6371000 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            # Calculate walking distance along roads (undirected - ignores one-way)
+            # Pedestrians walk on sidewalks/roads without U-turn or direction rules
+            student_nearest_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
+            walk_dist_m = walk_distance_on_roads(G, student_nearest_node, stop.node_id)
+            if walk_dist_m == float('inf'):
+                walk_dist_m = 0.0  # Fallback if graph disconnected
+            
+            # Calculate walk penalty for popup display
+            walk_penalty, _, walk_over_limit = calculate_walk_penalty(
+                student_obj, stop.node_id, G
+            )
 
             walk_warning_html = ""
             if student_obj.walk_radius > 0:
-                walk_info = f"{walk_dist_m:.0f}m / {student_obj.walk_radius}m"
-                if walk_dist_m > student_obj.walk_radius + 5:
-                    walk_warning_html = f'<br><b style="color:red;">⚠️ WARNING: Walk exceeds limit ({walk_dist_m:.0f}m)</b>'
+                if walk_over_limit and walk_penalty < float('inf'):
+                    walk_info = f"{walk_dist_m:.0f}m / {student_obj.walk_radius}m"
+                    walk_warning_html = f'<br><b style="color:orange;">Walking beyond limit (+{walk_penalty:.1f} min penalty)</b>'
+                elif walk_penalty == float('inf'):
+                    walk_info = f"{walk_dist_m:.0f}m / {student_obj.walk_radius}m"
+                    walk_warning_html = f'<br><b style="color:red;">Beyond absolute walk maximum!</b>'
+                else:
+                    walk_info = f"{walk_dist_m:.0f}m / {student_obj.walk_radius}m"
             else:
                 walk_info = f"{walk_dist_m:.0f}m (Door-to-Door Required)"
-                if walk_dist_m > 20: # 20m tolerance for snapping to nearest road
-                    walk_warning_html = f'<br><b style="color:red;">⚠️ WARNING: House too far from road ({walk_dist_m:.0f}m)</b>'
+                if walk_dist_m > 20:  # 20m tolerance for snapping to nearest road
+                    walk_warning_html = f'<br><b style="color:red;">House far from stop ({walk_dist_m:.0f}m)</b>'
 
             # Marker for student home
             folium.Marker(
@@ -318,55 +314,66 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                 icon=folium.Icon(color='blue', icon='home', prefix='fa')
             ).add_to(m)
             
-            # Try to find nearest nodes to student home and stop for walking path
-            try:
-                student_nearest_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
+            # Draw walking path along roads (undirected shortest path)
+            if walk_dist_m > 5:  # Only draw if meaningful distance
+                walk_line_color = 'orange' if walk_over_limit else route_color
                 
-                # Find walking path (preferring safe roads)
-                try:
-                    walking_path_nodes = nx.shortest_path(
-                        G, 
-                        student_nearest_node, 
-                        stop.node_id, 
-                        weight='length'
-                    )
-                    
-                    # Convert to coordinates
-                    walk_coords = [
-                        (G.nodes[node]['y'], G.nodes[node]['x']) 
-                        for node in walking_path_nodes
-                    ]
+                # Get road-following walk path
+                walk_path_nodes = walk_path_on_roads(G, student_nearest_node, stop.node_id)
+                
+                if walk_path_nodes and len(walk_path_nodes) >= 2:
+                    # Build coordinates following road geometry
+                    walk_coords = []
+                    for wi in range(len(walk_path_nodes) - 1):
+                        u, v = walk_path_nodes[wi], walk_path_nodes[wi + 1]
+                        # Try both edge directions (undirected path may reference either)
+                        data = G.get_edge_data(u, v) or G.get_edge_data(v, u)
+                        if data:
+                            edge_data = data[0] if 0 in data else list(data.values())[0]
+                            if 'geometry' in edge_data:
+                                geom_coords = list(edge_data['geometry'].coords)
+                                # Ensure correct direction
+                                node_u_x = G.nodes[u]['x'] if u in G.nodes else None
+                                if node_u_x is not None and len(geom_coords) > 1:
+                                    first_x = geom_coords[0][0]
+                                    if abs(first_x - node_u_x) > 0.0001:
+                                        geom_coords = list(reversed(geom_coords))
+                                for lon, lat in geom_coords:
+                                    walk_coords.append((lat, lon))
+                            else:
+                                walk_coords.append((G.nodes[u]['y'], G.nodes[u]['x']))
+                        else:
+                            walk_coords.append((G.nodes[u]['y'], G.nodes[u]['x']))
+                    # Add final node
+                    last_node = walk_path_nodes[-1]
+                    walk_coords.append((G.nodes[last_node]['y'], G.nodes[last_node]['x']))
                     
                     folium.PolyLine(
-                        walk_coords,
-                        color=route_color,
+                        locations=walk_coords,
+                        color=walk_line_color,
+                        weight=2,
+                        opacity=0.6,
+                        dash_array='8, 6',
+                        popup=folium.Popup(
+                            f"<div style='width:250px;'>"
+                            f"<b>Walking Path</b><br>"
+                            f"<b>Student:</b> {student_obj.id} ({student_obj.school_stage.name})<br>"
+                            f"<b>Distance:</b> {walk_dist_m:.0f}m (along roads)<br>"
+                            f"<b>Walk Limit:</b> {student_obj.walk_radius}m"
+                            f"{'<br><b>Penalty:</b> +' + f'{walk_penalty:.1f} min' if walk_over_limit else ''}"
+                            f"</div>",
+                            max_width=300
+                        )
+                    ).add_to(m)
+                else:
+                    # Fallback: straight dashed line if no path found
+                    folium.PolyLine(
+                        locations=[student_obj.coords, stop.coords],
+                        color=walk_line_color,
                         weight=2,
                         opacity=0.4,
-                        popup=folium.Popup(f"{student_obj.id} Walk Path", max_width=300),
-                        dash_array='2, 2',
-                        dash_offset='5'
+                        dash_array='8, 6'
                     ).add_to(m)
-                    
-                except nx.NetworkXNoPath:
-                    # Fallback to straight line
-                    walk_coords = [student_obj.coords, stop.coords]
-                    folium.PolyLine(
-                        walk_coords,
-                        color=route_color,
-                        weight=2,
-                        opacity=0.2,
-                        popup=folium.Popup(f"{student_obj.id} no path to stop", max_width=300)
-                    ).add_to(m)
-                    
-            except Exception as e:
-                # If node lookup fails, just draw straight line
-                walk_coords = [student_obj.coords, stop.coords]
-                folium.PolyLine(
-                    walk_coords,
-                    color=route_color,
-                    weight=2,
-                    opacity=0.2
-                ).add_to(m)
     
     # Add unserved students (failed assignments)
     if all_students:

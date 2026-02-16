@@ -1,4 +1,5 @@
 import copy
+from detour_engine import calculate_walk_penalty
 
 class ServiceSolution:
     """Represents a complete state of student-to-route assignments."""
@@ -16,11 +17,27 @@ class ServiceSolution:
         
     def calculate_objective(self):
         """
-        Formula: (count_served * 10000) - sum(route_travel_times)
+        Formula: (count_served * 10000) - sum(route_travel_times) - walk_penalties
+        Walk penalties discourage assigning students to stops beyond their
+        recommended walking radius, while still allowing it when necessary.
         """
         served_count = sum(1 for s in self.students if s.is_served)
         total_time = sum(r.total_time for r in self.routes)
-        return (served_count * 10000) - total_time
+        
+        # Calculate walk penalties for all served students
+        total_walk_penalty = 0.0
+        for student in self.students:
+            if not student.is_served or not student.assigned_stop:
+                continue
+            penalty, walk_m, over_limit = calculate_walk_penalty(
+                student, student.assigned_stop.node_id, self.graph
+            )
+            if penalty == float('inf'):
+                total_walk_penalty += 5000  # Heavy penalty but don't fully reject
+            else:
+                total_walk_penalty += penalty
+        
+        return (served_count * 10000) - total_time - total_walk_penalty
         
     def clone(self):
         """

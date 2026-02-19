@@ -1,10 +1,4 @@
 {
-  "status": "success",
-  "student_id": "S1",
-  "change_type": "temporary",
-  "algorithm_used": "2opt",
-  "insertion_cost_minutes": 73.84,
-  "walk_distance": 10.7,
   "school": {
     "name": "Victory College School",
     "latitude": 29.964406,
@@ -31,9 +25,9 @@
       "id": "R1",
       "bus_id": "BUS_1",
       "route_tmax": 90,
-      "total_distance_km": 15.62,
-      "total_time_minutes": 73.84,
-      "detour_time_used_today": 2.53,
+      "total_distance_km": 16.12,
+      "total_time_minutes": 74.54,
+      "detour_time_used_today": 0,
       "path": [
         {
           "node_id": 2208869932,
@@ -43,9 +37,9 @@
           "students": []
         },
         {
-          "node_id": 8244426647,
-          "latitude": 29.9601385,
-          "longitude": 31.2703967,
+          "node_id": 9992996016131269820,
+          "latitude": 29.960181015184613,
+          "longitude": 31.26997478936844,
           "type": "pickup",
           "students": [
             {
@@ -58,14 +52,34 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 55.6
+              "walk_distance": 15.1
             }
           ]
         },
         {
-          "node_id": 6586433895,
-          "latitude": 29.9550875,
-          "longitude": 31.274714,
+          "node_id": 9992995850631276834,
+          "latitude": 29.958652751946577,
+          "longitude": 31.276961091398704,
+          "type": "pickup",
+          "students": [
+            {
+              "id": "S1",
+              "home_latitude": 29.958506,
+              "home_longitude": 31.276834,
+              "school_stage": "ELEMENTARY",
+              "age": 10,
+              "fee": 100.0,
+              "assignment": "permanent",
+              "valid_from": null,
+              "valid_until": null,
+              "walk_distance": 20.4
+            }
+          ]
+        },
+        {
+          "node_id": 9992995500031275000,
+          "latitude": 29.95519319138084,
+          "longitude": 31.27485149216989,
           "type": "pickup",
           "students": [
             {
@@ -78,41 +92,14 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 29.2
+              "walk_distance": 25.8
             }
           ]
         },
         {
-          "node_id": 6585990899,
-          "latitude": 29.9586291,
-          "longitude": 31.2775708,
-          "type": "pickup",
-          "students": []
-        },
-        {
-          "node_id": 9992996151031276283,
-          "latitude": 29.96151068046462,
-          "longitude": 31.276172354375102,
-          "type": "pickup",
-          "students": [
-            {
-              "id": "S1",
-              "home_latitude": 29.9615107,
-              "home_longitude": 31.2762834,
-              "school_stage": "ELEMENTARY",
-              "age": 10,
-              "fee": 100.0,
-              "assignment": "temporary",
-              "valid_from": "2026-02-13",
-              "valid_until": "2026-02-13",
-              "walk_distance": 10.7
-            }
-          ]
-        },
-        {
-          "node_id": 315990370,
-          "latitude": 29.9705213,
-          "longitude": 31.2894522,
+          "node_id": 9992997000031290000,
+          "latitude": 29.97032826639092,
+          "longitude": 31.289354095085812,
           "type": "pickup",
           "students": [
             {
@@ -125,7 +112,7 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 78.4
+              "walk_distance": 72.1
             }
           ]
         },
@@ -168,6 +155,30 @@
               "walk_distance": 47.3
             }
           ]
+        },
+        {
+          "node_id": 2208869932,
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "type": "school",
+          "students": []
+        }
+      ]
+    },
+    {
+      "id": "R2",
+      "bus_id": "BUS_2",
+      "route_tmax": 90,
+      "total_distance_km": 0.0,
+      "total_time_minutes": 0.0,
+      "detour_time_used_today": 0,
+      "path": [
+        {
+          "node_id": 2208869932,
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "type": "school",
+          "students": []
         },
         {
           "node_id": 2208869932,

@@ -153,7 +153,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
         # Add stop markers
         for stop_idx, stop in enumerate(route.stops):
             student_count = len(stop.students)
-            stop_type = "Temporary" if stop.is_temporary else "Permanent"
+            stop_type = stop.stop_type.capitalize()  # "School" or "Pickup"
             
             # Create student list for popup
             student_list_html = ""
@@ -229,13 +229,8 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
     
     # Add student home locations and walking paths to stops
     for student_id, (stop, route, route_color) in student_stop_map.items():
-        # Find the student object to get home coordinates
-        student_obj = None
-        for stop_check in route.stops:
-            for stud in stop_check.students:
-                if stud.id == student_id:
-                    student_obj = stud
-                    break
+        # Find the student object directly from their assigned stop
+        student_obj = next((s for s in stop.students if s.id == student_id), None)
         
         if student_obj:
             # Get address from Nominatim
@@ -293,13 +288,26 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                 if walk_dist_m > 20:  # 20m tolerance for snapping to nearest road
                     walk_warning_html = f'<br><b style="color:red;">House far from stop ({walk_dist_m:.0f}m)</b>'
 
+            # Temporary students get a distinct red/orange marker so they stand out
+            is_temporary = getattr(student_obj, 'assignment', 'permanent') == 'temporary'
+            home_icon = folium.Icon(
+                color='orange' if is_temporary else 'blue',
+                icon='home',
+                prefix='fa'
+            )
+            assignment_label = (
+                f'<br><b style="color:darkorange;">Temporary: {student_obj.valid_from} → {student_obj.valid_until}</b>'
+                if is_temporary else ''
+            )
+
             # Marker for student home
             folium.Marker(
                 location=student_obj.coords,
                 popup=folium.Popup(f"""
-                <div style="width: 200px;">
-                    <b>Student: {student_obj.id}</b><br>
+                <div style="width: 220px;">
+                    <b>Student: {student_obj.id}</b>{assignment_label}<br>
                     Stage: {student_obj.school_stage.name}<br>
+                    Home: {student_obj.coords[0]:.6f}, {student_obj.coords[1]:.6f}<br>
                     Address: {address_name}<br>
                     <div style="margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">
                         <b>Routing Details:</b><br>
@@ -310,8 +318,8 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                     </div>
                 </div>
                 """, max_width=450),
-                tooltip=f"Home: {student_obj.id}",
-                icon=folium.Icon(color='blue', icon='home', prefix='fa')
+                tooltip=f"{'[TEMP] ' if is_temporary else ''}Home: {student_obj.id} ({student_obj.coords[0]:.5f}, {student_obj.coords[1]:.5f})",
+                icon=home_icon
             ).add_to(m)
             
             # Draw walking path along roads (undirected shortest path)
@@ -430,7 +438,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             <p style="margin: 0; font-size: 12px;">
                 Stops: {len(route.stops) - 2} | Students: {student_count} / {total_pool}<br>
                 Distance: {route.total_distance:.2f} km<br>
-                Ride Time: {ride_time:.1f} / {route.route_tmax} min (Total: {route.total_time:.1f})
+                Max Student Ride Time: {ride_time:.1f} / {route.route_tmax} min (Total: {route.total_time:.1f})
             </p>
         </div>
         """
@@ -451,7 +459,10 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             <span style="color: darkgreen; font-weight: bold;">●</span> School Location (Start/End)
         </p>
         <p style="margin: 5px 0;">
-            <span style="color: blue;">●</span> Student Home Location
+            <span style="color: blue;">●</span> Student Home (permanent)
+        </p>
+        <p style="margin: 5px 0;">
+            <span style="color: orange;">●</span> Student Home (temporary change)
         </p>
         <p style="margin: 5px 0;">
             <span style="color: red;">●</span> Bus Stop (Frontage/Stop)

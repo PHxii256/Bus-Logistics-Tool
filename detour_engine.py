@@ -1167,6 +1167,116 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
 
 
 # ============================================================================
+# 2-OPT INTRA-ROUTE OPTIMIZATION
+# ============================================================================
+
+def two_opt_improve(route, graph):
+    """Apply 2-opt local search to improve a single route's stop ordering.
+    
+    Repeatedly tries reversing sub-sequences of pickup stops (keeping
+    school start/end stops fixed) and keeps each improvement that reduces
+    total route time. Runs until no further improvement is found.
+    
+    Args:
+        route: Route object with at least 2 stops (school-start ... school-end)
+        graph: NetworkX road graph
+        
+    Returns:
+        float: Total time improvement in minutes (positive = saved)
+    """
+    if len(route.stops) < 4:
+        # Need at least: school-start, 2 pickups, school-end to swap anything
+        return 0.0
+    
+    original_time = calculate_route_time(route, graph)
+    improved = True
+    
+    while improved:
+        improved = False
+        # Only reverse among interior stops (index 1 .. len-2)
+        n = len(route.stops)
+        for i in range(1, n - 2):
+            for j in range(i + 1, n - 1):
+                # Try reversing stops[i..j]
+                new_stops = route.stops[:i] + route.stops[i:j+1][::-1] + route.stops[j+1:]
+                
+                # Evaluate the new ordering
+                old_stops = route.stops
+                route.stops = new_stops
+                new_time = calculate_route_time(route, graph)
+                
+                if new_time < original_time - 0.01:
+                    # Improvement found — keep it
+                    original_time = new_time
+                    route.total_time = new_time
+                    improved = True
+                else:
+                    # Revert
+                    route.stops = old_stops
+    
+    final_time = calculate_route_time(route, graph)
+    route.total_time = final_time
+    route.total_distance = calculate_route_distance(route, graph)
+    
+    return max(0.0, original_time - final_time)
+
+
+def insert_with_2opt(new_student, existing_routes, graph, detour_type='temporary',
+                     daily_detour_budget=5):
+    """Insert student via cheapest insertion, then improve with 2-opt.
+    
+    Combines cheapest_insertion for initial placement with two_opt_improve
+    for local search. This is the recommended fast algorithm for Mode 2
+    change_location requests.
+    
+    Args:
+        new_student: Student to insert
+        existing_routes: List of Route objects
+        graph: NetworkX road graph
+        detour_type: 'temporary' or 'permanent'
+        daily_detour_budget: Budget for temporary detours
+        
+    Returns:
+        Same as process_detour_request: (success, route_or_none, message)
+    """
+    if not existing_routes:
+        return False, None, "No existing routes available"
+    
+    # Step 1: Cheapest Insertion
+    result, reason = cheapest_insertion(
+        new_student, existing_routes, graph, detour_type, daily_detour_budget
+    )
+    
+    if result is None:
+        return False, None, f"Insertion failed: {reason}"
+    
+    route = result['route']
+    new_stop = result['new_stop']
+    position = result['insertion_position']
+    delta_time = result['insertion_cost_minutes']
+    
+    # Insert the stop
+    if result['is_new_stop']:
+        route.stops.insert(position, new_stop)
+    new_stop.add_student(new_student)
+    
+    # Step 2: 2-opt improvement on the affected route
+    time_saved = two_opt_improve(route, graph)
+    
+    # Update accounting
+    if detour_type == 'temporary':
+        route.add_detour_time(max(0, delta_time - time_saved))
+    
+    route.total_distance = calculate_route_distance(route, graph)
+    route.total_time = calculate_route_time(route, graph)
+    
+    message = (f"2-opt insert: {new_student.id} -> Route {route.route_id}, "
+               f"Stop {new_stop.node_id}, Cost +{delta_time:.2f} min, "
+               f"2-opt saved {time_saved:.2f} min")
+    return True, route, message
+
+
+# ============================================================================
 # MAIN DETOUR REQUEST HANDLER
 # ============================================================================
 
@@ -1210,12 +1320,9 @@ def process_detour_request(student, existing_routes, graph, detour_type='tempora
     # Update route
     if result['is_new_stop']:
         route.stops.insert(position, new_stop)
-        new_stop.is_temporary = (detour_type == 'temporary')
     
-    # If the request is permanent, the stop must be permanent even if it existed before
-    if detour_type == 'permanent':
-        new_stop.is_temporary = False
-    
+    # Set student assignment type
+    student.assignment = detour_type  # "temporary" or "permanent"
     new_stop.add_student(student)
     
     # Update accounting

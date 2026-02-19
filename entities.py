@@ -19,9 +19,10 @@ def calc_max_walk_distance(school_stage):
 
 
 class Student:  
-    def __init__(self, id, lat, lon, age, school_stage, fee):
+    def __init__(self, id, lat, lon, age, school_stage, fee,
+                 assignment="permanent", valid_from=None, valid_until=None):
         self.id = id
-        self.coords = (lat, lon)
+        self.coords = (lat, lon)          # home location
         self.age = age
         self.school_stage = school_stage
         self.fee = fee
@@ -29,6 +30,11 @@ class Student:
         self.assigned_stop = None
         self.is_served = False
         self.failure_reason = ""
+        # Assignment type: "permanent" or "temporary"
+        self.assignment = assignment
+        # Date range for temporary assignments (ISO strings or None)
+        self.valid_from = valid_from
+        self.valid_until = valid_until
 
         
 
@@ -47,7 +53,7 @@ class Stop:
     students can be picked up or dropped off. Each stop tracks which students
     are assigned to it and ensures they can reach it within their walk radius.
     """
-    def __init__(self, node_id, lat, lon, stop_id=None):
+    def __init__(self, node_id, lat, lon, stop_id=None, stop_type="pickup"):
         """Initialize a Stop.
         
         Args:
@@ -55,12 +61,13 @@ class Stop:
             lat: Latitude coordinate
             lon: Longitude coordinate
             stop_id: Optional unique identifier for the stop
+            stop_type: "school" or "pickup"
         """
         self.node_id = node_id
         self.coords = (lat, lon)  # (lat, lon) tuple
         self.students = []
         self.stop_id = stop_id
-        self.is_temporary = False
+        self.stop_type = stop_type      # "school" or "pickup"
         
     def add_student(self, student):
         """Add a student to this stop.
@@ -96,7 +103,7 @@ class Stop:
         return len(self.students)
     
     def __repr__(self):
-        return f"Stop(node={self.node_id}, students={len(self.students)})"
+        return f"Stop(node={self.node_id}, type={self.stop_type}, students={len(self.students)})"
 
 
 class Route:

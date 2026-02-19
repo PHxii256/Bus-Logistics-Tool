@@ -3,8 +3,8 @@
   "student_id": "S1",
   "change_type": "temporary",
   "algorithm_used": "2opt",
-  "insertion_cost_minutes": 73.84,
-  "walk_distance": 10.7,
+  "insertion_cost_minutes": 73.83,
+  "walk_distance": 73.9,
   "school": {
     "name": "Victory College School",
     "latitude": 29.964406,
@@ -31,9 +31,9 @@
       "id": "R1",
       "bus_id": "BUS_1",
       "route_tmax": 90,
-      "total_distance_km": 15.62,
-      "total_time_minutes": 73.84,
-      "detour_time_used_today": 2.53,
+      "total_distance_km": 16.45,
+      "total_time_minutes": 73.83,
+      "detour_time_used_today": 2.96,
       "path": [
         {
           "node_id": 2208869932,
@@ -41,6 +41,26 @@
           "longitude": 31.270124,
           "type": "school",
           "students": []
+        },
+        {
+          "node_id": 9992996200031272000,
+          "latitude": 29.961470282944664,
+          "longitude": 31.27246380514693,
+          "type": "pickup",
+          "students": [
+            {
+              "id": "S1",
+              "home_latitude": 29.962,
+              "home_longitude": 31.272,
+              "school_stage": "ELEMENTARY",
+              "age": 10,
+              "fee": 100.0,
+              "assignment": "temporary",
+              "valid_from": "2026-02-13",
+              "valid_until": "2026-02-13",
+              "walk_distance": 73.9
+            }
+          ]
         },
         {
           "node_id": 8244426647,
@@ -88,26 +108,6 @@
           "longitude": 31.2775708,
           "type": "pickup",
           "students": []
-        },
-        {
-          "node_id": 9992996151031276283,
-          "latitude": 29.96151068046462,
-          "longitude": 31.276172354375102,
-          "type": "pickup",
-          "students": [
-            {
-              "id": "S1",
-              "home_latitude": 29.9615107,
-              "home_longitude": 31.2762834,
-              "school_stage": "ELEMENTARY",
-              "age": 10,
-              "fee": 100.0,
-              "assignment": "temporary",
-              "valid_from": "2026-02-13",
-              "valid_until": "2026-02-13",
-              "walk_distance": 10.7
-            }
-          ]
         },
         {
           "node_id": 315990370,
@@ -168,6 +168,30 @@
               "walk_distance": 47.3
             }
           ]
+        },
+        {
+          "node_id": 2208869932,
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "type": "school",
+          "students": []
+        }
+      ]
+    },
+    {
+      "id": "R2",
+      "bus_id": "BUS_2",
+      "route_tmax": 90,
+      "total_distance_km": 0.0,
+      "total_time_minutes": 0.0,
+      "detour_time_used_today": 0,
+      "path": [
+        {
+          "node_id": 2208869932,
+          "latitude": 29.9644413,
+          "longitude": 31.270124,
+          "type": "school",
+          "students": []
         },
         {
           "node_id": 2208869932,

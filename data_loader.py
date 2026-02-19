@@ -1,8 +1,11 @@
 """
 Data loader for the Safety-Aware Bus Optimization algorithm
 
-This module loads student, bus, and route data from a JSON config file
-and sets up the data structures needed to run the algorithm.
+Handles two service modes:
+  Mode 1 (generate_routes): Load students, buses, constraints -> create empty routes
+  Mode 2 (change_location): Load existing routes (unified schema) -> reconstruct objects
+
+Also provides serialization to the unified route schema for output.
 """
 
 import json
@@ -11,30 +14,12 @@ import networkx as nx
 import osmnx as ox
 
 
-def load_input_data(json_file):
-    """Load input data from JSON file.
-    
-    Args:
-        json_file: Path to JSON input file
-        
-    Returns:
-        Dict with keys: school, buses, students, routes, config
-    """
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    
-    return data
-
+# ============================================================================
+# HELPERS
+# ============================================================================
 
 def school_stage_from_string(stage_str):
-    """Convert string to School_Stage enum.
-    
-    Args:
-        stage_str: String like 'ELEMENTARY', 'MIDDLE', 'HIGH', 'KG'
-        
-    Returns:
-        School_Stage enum value
-    """
+    """Convert string to School_Stage enum."""
     stage_map = {
         'KG': School_Stage.KG,
         'ELEMENTARY': School_Stage.ELEMENTARY,
@@ -44,39 +29,14 @@ def school_stage_from_string(stage_str):
     return stage_map.get(stage_str.upper(), School_Stage.ELEMENTARY)
 
 
-def create_students_from_data(student_data_list):
-    """Create Student objects from JSON data.
-    
-    Args:
-        student_data_list: List of student dicts from JSON
-        
-    Returns:
-        List of Student objects
-    """
-    students = []
-    for data in student_data_list:
-        student = Student(
-            id=data.get('id'),
-            lat=data.get('latitude'),
-            lon=data.get('longitude'),
-            age=data.get('age'),
-            school_stage=school_stage_from_string(data.get('school_stage', 'ELEMENTARY')),
-            fee=data.get('fee', 100.0)
-        )
-        students.append(student)
-    
-    return students
+def load_json(json_file):
+    """Load raw JSON from file."""
+    with open(json_file, 'r') as f:
+        return json.load(f)
 
 
-def create_buses_from_data(bus_data_list):
-    """Create Bus objects from JSON data.
-    
-    Args:
-        bus_data_list: List of bus dicts from JSON
-        
-    Returns:
-        Dict mapping bus_id to Bus object
-    """
+def _create_buses_dict(bus_data_list):
+    """Create dict mapping bus_id -> Bus object from JSON bus array."""
     buses = {}
     for data in bus_data_list:
         bus = Bus(
@@ -86,114 +46,298 @@ def create_buses_from_data(bus_data_list):
             var_cost_km=data.get('var_cost_km')
         )
         buses[data.get('id')] = bus
-    
     return buses
 
 
-def create_routes_from_data(route_data_list, buses_dict, G):
-    """Create Route objects with initial stops from JSON data.
-    
-    Args:
-        route_data_list: List of route dicts from JSON
-        buses_dict: Dict of bus_id -> Bus object
-        G: NetworkX graph for snapping stops to nodes
-        
-    Returns:
-        List of Route objects
-    """
-    routes = []
-    
-    for data in route_data_list:
-        bus = buses_dict.get(data.get('bus_id'))
-        if not bus:
-            print(f"Warning: Bus {data.get('bus_id')} not found")
-            continue
-        
-        route = Route(
-            bus=bus,
-            route_id=data.get('id'),
-            route_tmax=data.get('route_tmax', 60)
+def _create_students(student_data_list):
+    """Create Student objects from JSON array."""
+    students = []
+    for data in student_data_list:
+        student = Student(
+            id=data.get('id'),
+            lat=data.get('latitude'),
+            lon=data.get('longitude'),
+            age=data.get('age'),
+            school_stage=school_stage_from_string(data.get('school_stage', 'ELEMENTARY')),
+            fee=data.get('fee', 100.0),
+            assignment=data.get('assignment', 'permanent'),
+            valid_from=data.get('valid_from'),
+            valid_until=data.get('valid_until')
         )
-        
-        # Add stops to route by snapping to nearest nodes
-        for stop_idx, stop_data in enumerate(data.get('initial_stops', [])):
-            lat = stop_data.get('latitude')
-            lon = stop_data.get('longitude')
-            
-            # Snap to nearest node
-            try:
-                nearest_node = ox.nearest_nodes(G, lon, lat)
-                node_lat = G.nodes[nearest_node]['y']
-                node_lon = G.nodes[nearest_node]['x']
-                
-                stop = Stop(
-                    node_id=nearest_node,
-                    lat=node_lat,
-                    lon=node_lon,
-                    stop_id=f"{data.get('id')}-Stop-{stop_idx}"
-                )
-                route.stops.append(stop)
-                
-            except Exception as e:
-                print(f"Warning: Could not snap stop {stop_data.get('description')} for route {data.get('id')}: {e}")
-                continue
-        
-        routes.append(route)
-    
-    return routes
+        students.append(student)
+    return students
 
 
-def setup_algorithm_inputs(json_file, G):
-    """Load all data and prepare for algorithm execution.
+# ============================================================================
+# MODE 1: Generate Routes (initial optimization)
+# ============================================================================
+
+def load_mode1_input(data, G):
+    """Load Mode 1 (generate_routes) input.
     
     Args:
-        json_file: Path to JSON input file
-        G: NetworkX graph (must have travel_time and is_safe_to_cross attributes)
+        data: Parsed JSON dict with mode="generate_routes"
+        G: NetworkX road graph
         
     Returns:
-        Tuple of (students, buses, routes, school_coords, config)
+        Tuple of (students, buses_dict, routes, school_coords, constraints, algo_config)
     """
-    # Load JSON
-    data = load_input_data(json_file)
-    
-    # Extract school coordinates
     school = data.get('school', {})
     school_coords = {
         'latitude': school.get('latitude'),
         'longitude': school.get('longitude'),
-        'name': school.get('name')
+        'name': school.get('name', 'School')
     }
     
-    # Create objects
-    students = create_students_from_data(data.get('permanent_students', []))
-    buses = create_buses_from_data(data.get('buses', []))
-    routes = create_routes_from_data(data.get('routes', []), buses, G)
+    buses = _create_buses_dict(data.get('buses', []))
+    students = _create_students(data.get('students', []))
+    constraints = data.get('constraints', {})
+    algo_config = data.get('algorithm', {'method': 'alns', 'iterations': 60})
     
-    # Extract config
-    config = data.get('algorithm_config', {})
+    # Create one route per bus, each starting with school start/end stops
+    routes = []
+    route_tmax = constraints.get('route_tmax', 90)
     
-    print(f"Loaded {len(students)} students")
-    print(f"Loaded {len(buses)} buses")
-    print(f"Loaded {len(routes)} routes")
-    print(f"School: {school_coords['name']} at ({school_coords['latitude']}, {school_coords['longitude']})")
+    for i, (bus_id, bus) in enumerate(buses.items()):
+        route = Route(bus=bus, route_id=f"R{i+1}", route_tmax=route_tmax)
+        
+        # Snap school to nearest node for start/end stops
+        school_node = ox.nearest_nodes(G, school_coords['longitude'], school_coords['latitude'])
+        node_lat = G.nodes[school_node]['y']
+        node_lon = G.nodes[school_node]['x']
+        
+        start_stop = Stop(school_node, node_lat, node_lon,
+                          stop_id=f"R{i+1}-Start", stop_type="school")
+        end_stop = Stop(school_node, node_lat, node_lon,
+                        stop_id=f"R{i+1}-End", stop_type="school")
+        route.stops = [start_stop, end_stop]
+        routes.append(route)
     
-    return students, buses, routes, school_coords, config
+    return students, buses, routes, school_coords, constraints, algo_config
 
 
-def print_input_summary(students, buses, routes, school_coords):
-    """Print a summary of loaded data.
+# ============================================================================
+# MODE 2: Change Location (single student re-assignment)
+# ============================================================================
+
+def load_mode2_input(data, G):
+    """Load Mode 2 (change_location) input.
+    
+    Reconstructs Route/Stop/Student objects from the unified route schema,
+    then extracts the change request details.
     
     Args:
-        students: List of Student objects
-        buses: Dict of bus_id -> Bus objects
-        routes: List of Route objects
-        school_coords: Dict with school location
+        data: Parsed JSON dict with mode="change_location"
+        G: NetworkX road graph
+        
+    Returns:
+        Tuple of (student_id, new_coords, change_type, valid_from, valid_until,
+                  algo_config, routes, all_students, buses_dict, school_coords)
     """
+    school = data.get('school', {})
+    school_coords = {
+        'latitude': school.get('latitude'),
+        'longitude': school.get('longitude'),
+        'name': school.get('name', 'School')
+    }
+    
+    buses = _create_buses_dict(data.get('buses', []))
+    
+    # Reconstruct routes from unified schema
+    routes, all_students = _reconstruct_routes(data.get('routes', []), buses, G)
+    
+    # Extract change request
+    student_id = data.get('student_id')
+    new_loc = data.get('new_location', {})
+    new_coords = (new_loc.get('latitude'), new_loc.get('longitude'))
+    change_type = data.get('change_type', 'temporary')
+    valid_from = data.get('valid_from')
+    valid_until = data.get('valid_until')
+    algo_config = data.get('algorithm', {'method': 'cheapest_insertion'})
+    
+    return (student_id, new_coords, change_type, valid_from, valid_until,
+            algo_config, routes, all_students, buses, school_coords)
+
+
+def _reconstruct_routes(routes_json, buses_dict, G):
+    """Rebuild Route/Stop/Student objects from the unified route schema.
+    
+    Args:
+        routes_json: List of route dicts from the unified schema
+        buses_dict: Dict of bus_id -> Bus
+        G: NetworkX graph (for node validation)
+        
+    Returns:
+        Tuple of (routes_list, all_students_list)
+    """
+    routes = []
+    all_students = []
+    
+    for route_data in routes_json:
+        bus_id = route_data.get('bus_id')
+        bus = buses_dict.get(bus_id)
+        if not bus:
+            print(f"Warning: Bus '{bus_id}' not found, skipping route {route_data.get('id')}")
+            continue
+        
+        route = Route(
+            bus=bus,
+            route_id=route_data.get('id'),
+            route_tmax=route_data.get('route_tmax', 90)
+        )
+        route.total_distance = route_data.get('total_distance_km', 0)
+        route.total_time = route_data.get('total_time_minutes', 0)
+        route.detour_time_used = route_data.get('detour_time_used_today', 0)
+        
+        for stop_data in route_data.get('path', []):
+            stop = Stop(
+                node_id=stop_data.get('node_id'),
+                lat=stop_data.get('latitude'),
+                lon=stop_data.get('longitude'),
+                stop_type=stop_data.get('type', 'pickup')
+            )
+            
+            # Reconstruct students at this stop
+            for s_data in stop_data.get('students', []):
+                student = Student(
+                    id=s_data.get('id'),
+                    lat=s_data.get('home_latitude'),
+                    lon=s_data.get('home_longitude'),
+                    age=s_data.get('age', 0),
+                    school_stage=school_stage_from_string(s_data.get('school_stage', 'ELEMENTARY')),
+                    fee=s_data.get('fee', 0),
+                    assignment=s_data.get('assignment', 'permanent'),
+                    valid_from=s_data.get('valid_from'),
+                    valid_until=s_data.get('valid_until')
+                )
+                stop.add_student(student)
+                all_students.append(student)
+            
+            route.stops.append(stop)
+        
+        routes.append(route)
+    
+    return routes, all_students
+
+
+# ============================================================================
+# OUTPUT SERIALIZATION: Unified Route Schema
+# ============================================================================
+
+def serialize_routes(routes, buses, school_coords, unserved_students=None, graph=None):
+    """Serialize Route/Stop/Student objects to the unified route schema.
+    
+    This is the single output format used by both Mode 1 and Mode 2.
+    
+    Args:
+        routes: List of Route objects
+        buses: Dict of bus_id -> Bus
+        school_coords: Dict with name, latitude, longitude
+        unserved_students: Optional list of Student objects that weren't placed
+        graph: Optional graph for walk distance computation
+        
+    Returns:
+        Dict in the unified route schema format
+    """
+    from detour_engine import haversine_walk_distance
+    
+    # Build bus_id lookup (reverse: Bus object -> id)
+    bus_to_id = {}
+    for bid, bus_obj in buses.items():
+        bus_to_id[id(bus_obj)] = bid
+    
+    output = {
+        "school": {
+            "name": school_coords.get('name', 'School'),
+            "latitude": school_coords.get('latitude'),
+            "longitude": school_coords.get('longitude')
+        },
+        "buses": [
+            {
+                "id": bus_id,
+                "type": b.bus_type,
+                "capacity": b.capacity,
+                "fixed_cost": b.fixed_cost,
+                "var_cost_km": b.var_cost_km
+            } for bus_id, b in buses.items()
+        ],
+        "routes": [],
+        "unserved_students": []
+    }
+    
+    for route in routes:
+        # Skip routes that have no pickup stops (school-only routes are empty)
+        if not any(stop.stop_type != 'school' for stop in route.stops):
+            continue
+
+        route_bus_id = bus_to_id.get(id(route.bus), "UNKNOWN")
+
+        path_data = []
+        for stop in route.stops:
+            students_data = []
+            for s in stop.students:
+                # Calculate walk distance (haversine, meters)
+                walk_d = haversine_walk_distance(s.coords[0], s.coords[1],
+                                                 stop.coords[0], stop.coords[1])
+                
+                students_data.append({
+                    "id": s.id,
+                    "home_latitude": s.coords[0],
+                    "home_longitude": s.coords[1],
+                    "school_stage": s.school_stage.name,
+                    "age": s.age,
+                    "fee": s.fee,
+                    "assignment": s.assignment,
+                    "valid_from": s.valid_from,
+                    "valid_until": s.valid_until,
+                    "walk_distance": round(walk_d, 1)
+                })
+            
+            path_data.append({
+                "node_id": stop.node_id,
+                "latitude": stop.coords[0],
+                "longitude": stop.coords[1],
+                "type": stop.stop_type,
+                "students": students_data
+            })
+        
+        output["routes"].append({
+            "id": route.route_id,
+            "bus_id": route_bus_id,
+            "route_tmax": route.route_tmax,
+            "total_distance_km": round(route.total_distance, 2),
+            "total_time_minutes": round(route.total_time, 2),
+            "detour_time_used_today": round(route.detour_time_used, 2),
+            "path": path_data
+        })
+    
+    # Add unserved students
+    if unserved_students:
+        for s in unserved_students:
+            output["unserved_students"].append({
+                "id": s.id,
+                "home_latitude": s.coords[0],
+                "home_longitude": s.coords[1],
+                "school_stage": s.school_stage.name,
+                "age": s.age,
+                "fee": s.fee,
+                "reason": s.failure_reason or "No valid insertion found"
+            })
+    
+    return output
+
+
+# ============================================================================
+# PRINTING HELPERS
+# ============================================================================
+
+def print_input_summary(students, buses, routes, school_coords):
+    """Print a summary of loaded data."""
     print(f"\n{'='*80}")
     print("INPUT DATA SUMMARY")
     print(f"{'='*80}\n")
     
-    print(f"School: {school_coords['name']}")
+    print(f"School: {school_coords.get('name', 'School')}")
     print(f"  Location: ({school_coords['latitude']}, {school_coords['longitude']})\n")
     
     print(f"Students: {len(students)}")

@@ -10,6 +10,8 @@ import sys
 import os
 import json
 import time as _t
+import hashlib
+import shutil
 import osmnx as ox
 import networkx as nx
 
@@ -29,6 +31,59 @@ from visualization import create_route_map
 from solution_state import ServiceSolution
 from alns_engine import ALNSEngine
 from entities import Student
+
+
+# ============================================================================
+# RUN HISTORY: Save each run to runs_history/{mode}_{school}_{hash8}/
+# ============================================================================
+
+def _input_hash(data: dict) -> str:
+    """Stable 8-char hash of the input so same input → same folder."""
+    canonical = json.dumps(data, sort_keys=True, ensure_ascii=True)
+    return hashlib.md5(canonical.encode()).hexdigest()[:8]
+
+
+def _slug(text: str) -> str:
+    """Turn an arbitrary string into a safe folder-name component."""
+    import re
+    return re.sub(r'[^a-zA-Z0-9]+', '_', text).strip('_').lower()[:30]
+
+
+def save_run(input_data: dict, output_data: dict, report_data: dict,
+            map_files: dict = None):
+    """
+    Persist a run to:  runs_history/<hash8>/
+      input.json       — exact input passed to the algorithm
+      output.json      — serialized routes / result
+      report.json      — diagnostics (runtime, buses used, …)
+      <map_files>      — one or more html maps (copied if they exist)
+
+    map_files: dict of {dest_filename: src_path}, e.g.
+      {'route_map.html': 'route_map.html'}
+      {'route_map_old.html': 'route_map_old.html',
+       'route_map_new.html': 'route_map_new.html'}
+
+    Same input always maps to the same folder — no duplicates created.
+    """
+    run_hash = _input_hash(input_data)
+    run_dir  = os.path.join('runs_history', run_hash)
+
+    os.makedirs(run_dir, exist_ok=True)
+
+    with open(os.path.join(run_dir, 'input.json'),  'w') as f:
+        json.dump(input_data,  f, indent=2)
+    with open(os.path.join(run_dir, 'output.json'), 'w') as f:
+        json.dump(output_data, f, indent=2)
+    with open(os.path.join(run_dir, 'report.json'), 'w') as f:
+        json.dump(report_data, f, indent=2)
+
+    if map_files:
+        for dest_name, src_path in map_files.items():
+            if os.path.exists(src_path):
+                shutil.copy2(src_path, os.path.join(run_dir, dest_name))
+
+    print(f"  Run saved to '{run_dir}/'")
+    return run_dir
 
 
 # ============================================================================
@@ -239,7 +294,9 @@ def run_generate_routes(data, G, input_file_path):
     initial_sol = ServiceSolution(students, routes, G)
     iterations = algo_config.get('iterations', 60)
     optimizer = ALNSEngine(initial_sol, iterations=iterations)
+    _alns_start = _t.time()
     best_sol = optimizer.run()
+    _alns_elapsed = _t.time() - _alns_start
 
     students = best_sol.students
     routes = best_sol.routes
@@ -279,6 +336,30 @@ def run_generate_routes(data, G, input_file_path):
     if unserved:
         print(f"  Unserved: {[s.id for s in unserved]}")
     print(f"  Total runtime: {_total_elapsed:.2f}s")
+
+    # ── Save run history ──────────────────────────────────────────────────────
+    buses_used = [
+        {"id": bus_id, "capacity": cap}
+        for bus_id, cap in {
+            r.bus.bus_id: r.bus.capacity for r in routes_with_students
+        }.items()
+    ]
+    report = {
+        "run_timestamp":             _t.strftime('%Y-%m-%dT%H:%M:%S'),
+        "mode":                      "generate_routes",
+        "input_file":                input_file_path,
+        "total_runtime_seconds":     round(_total_elapsed, 2),
+        "optimization_time_seconds": round(_alns_elapsed, 2),
+        "students_total":            len(students),
+        "students_served":           served_count,
+        "students_unserved":         [s.id for s in unserved],
+        "routes_created":            len(routes_with_students),
+        "buses_used":                buses_used,
+        "final_objective":           round(best_sol.calculate_objective(), 2),
+        "alns_iterations":           algo_config.get('iterations', 60),
+    }
+    save_run(data, output, report, map_files={'route_map.html': 'route_map.html'})
+    # ─────────────────────────────────────────────────────────────────────────
 
     return output
 
@@ -381,12 +462,16 @@ def run_change_location(data, G, input_file_path):
         route.total_time = calculate_route_time(route, G)
 
     # Update route map visualization if insertion succeeded
+    # Save the pre-change map as route_map_old.html first
+    if os.path.exists('route_map.html'):
+        shutil.copy2('route_map.html', 'route_map_old.html')
+
     if success:
         routes_with_students = [r for r in routes if r.get_student_count() > 0]
         if routes_with_students:
             create_route_map(G, routes_with_students, all_students=all_students,
-                             school_coords=school_coords, output_file='route_map.html')
-            print(f"  Route map updated: route_map.html")
+                             school_coords=school_coords, output_file='route_map_new.html')
+            print(f"  Route map saved: route_map_old.html (before) / route_map_new.html (after)")
 
     # Build output
     if success:
@@ -422,6 +507,36 @@ def run_change_location(data, G, input_file_path):
     _total_elapsed = _t.time() - _run_start
     print(f"\nResponse saved to '{output_path}'")
     print(f"  Total runtime: {_total_elapsed:.2f}s")
+
+    # ── Save run history ──────────────────────────────────────────────────────
+    active_routes = [r for r in routes if r.get_student_count() > 0]
+    buses_used = [
+        {"id": bus_id, "capacity": cap}
+        for bus_id, cap in {
+            r.bus.bus_id: r.bus.capacity for r in active_routes
+        }.items()
+    ]
+    served_count = sum(1 for s in all_students if s.is_served)
+    report = {
+        "run_timestamp":         _t.strftime('%Y-%m-%dT%H:%M:%S'),
+        "mode":                  "change_location",
+        "input_file":            input_file_path,
+        "total_runtime_seconds": round(_total_elapsed, 2),
+        "student_changed":       student_id,
+        "change_type":           change_type,
+        "algorithm_used":        method,
+        "status":                output.get('status'),
+        "students_total":        len(all_students),
+        "students_served":       served_count,
+        "routes_active":         len(active_routes),
+        "buses_used":            buses_used,
+    }
+    save_run(data, output, report, map_files={
+        'route_map_old.html': 'route_map_old.html',
+        'route_map_new.html': 'route_map_new.html',
+    })
+    # ─────────────────────────────────────────────────────────────────────────
+
     return output
 
 

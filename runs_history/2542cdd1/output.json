@@ -28,8 +28,8 @@
       "ride_time_multiplier": 2.5,
       "floor_minutes": 45,
       "ceiling_minutes": 60,
-      "total_distance_km": 16.12,
-      "total_time_minutes": 74.45,
+      "total_distance_km": 17.25,
+      "total_time_minutes": 81.82,
       "detour_time_used_today": 0,
       "path": [
         {
@@ -38,26 +38,6 @@
           "longitude": 31.270124,
           "type": "school",
           "students": []
-        },
-        {
-          "node_id": 9992996016131269820,
-          "latitude": 29.960181015184613,
-          "longitude": 31.26997478936844,
-          "type": "pickup",
-          "students": [
-            {
-              "id": "S6",
-              "home_latitude": 29.960161,
-              "home_longitude": 31.26982,
-              "school_stage": "ELEMENTARY",
-              "age": 10,
-              "fee": 100.0,
-              "assignment": "permanent",
-              "valid_from": null,
-              "valid_until": null,
-              "walk_distance": 22.8
-            }
-          ]
         },
         {
           "node_id": 9992995850631276834,
@@ -76,6 +56,26 @@
               "valid_from": null,
               "valid_until": null,
               "walk_distance": 18.7
+            }
+          ]
+        },
+        {
+          "node_id": 9992996016131269820,
+          "latitude": 29.960181015184613,
+          "longitude": 31.26997478936844,
+          "type": "pickup",
+          "students": [
+            {
+              "id": "S6",
+              "home_latitude": 29.960161,
+              "home_longitude": 31.26982,
+              "school_stage": "ELEMENTARY",
+              "age": 10,
+              "fee": 100.0,
+              "assignment": "permanent",
+              "valid_from": null,
+              "valid_until": null,
+              "walk_distance": 22.8
             }
           ]
         },

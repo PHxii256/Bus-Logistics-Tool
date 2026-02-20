@@ -45,6 +45,7 @@ def _create_buses_dict(bus_data_list):
             fixed_cost=data.get('fixed_cost'),
             var_cost_km=data.get('var_cost_km')
         )
+        bus.bus_id = data.get('id')   # store for reporting / serialization
         buses[data.get('id')] = bus
     return buses
 

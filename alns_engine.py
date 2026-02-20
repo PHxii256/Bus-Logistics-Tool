@@ -345,6 +345,9 @@ class ALNSEngine:
         self.s1 = 30 # New global best
         self.s2 = 15 # Better than current
         self.s3 = 5  # Accepted (Simulated Annealing)
+
+        # Iteration diagnostics — populated during run()
+        self.iteration_log = []
         
     def run(self):
         t = self.temp
@@ -401,6 +404,12 @@ class ALNSEngine:
                 block_end_time = time.time()
                 block_elapsed = block_end_time - block_start_time
                 print(f"Iteration {i+1}: Best Obj = {best_obj:.2f}, Temp = {t:.1f}, Last 10 iter: {block_elapsed:.2f}s")
+                self.iteration_log.append({
+                    "iteration":             i + 1,
+                    "best_objective":        round(best_obj, 2),
+                    "students_served":       sum(1 for s in self.best_sol.students if s.is_served),
+                    "block_elapsed_seconds": round(block_elapsed, 3)
+                })
                 block_start_time = block_end_time
 
         total_elapsed = time.time() - start_time

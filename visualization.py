@@ -512,9 +512,6 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             <span style="color: orange;">●</span> Student Home (temporary change)
         </p>
         <p style="margin: 5px 0;">
-            <span style="color: red;">●</span> Bus Stop (Frontage/Stop)
-        </p>
-        <p style="margin: 5px 0;">
             <span style="color: black;">●</span> Unassigned Student (Failed)
         </p>
         <p style="margin: 10px 0 5px 0; font-weight: bold;">Route Statistics</p>

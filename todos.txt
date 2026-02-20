@@ -12,3 +12,46 @@ when it comes to satisying the constraints (not sure how we would deal with that
 
 but since we eleminate route level tMax and instead compare between direct time to school given our formulas for calculating time 
 vs time since boarding the bus it makes the actual value of the time estimate less relevant when it comes to route packing effiency(?)
+
+
+answer: its better to overestimate consistently than underestimate (could be calibrated later manually or automatically)
+
+
+next step:
+> save results (done)
+this makes us have a folder for each run, containing input data, 
+output data and html visualisation, each folder should be dedicated for a given input
+so that if we run the algo on the same input twice we dont get a duplicate folder
+all those folder should be in a runs_history folder. also have in the output the total run time and other diagonistic
+results like run time per itteration and best object val and students served and routes created and the busses used have it be
+in report.json for this run
+
+
+> next steps:
+datasets, creating new inputs (datasets) currently is very time consuming
+create a tool to help create the datasets, the most consuming part is selecting reasonable coordinates for student home location
+
+we could have types of datasets of varying density / sparcity and for different school locations in cario.
+doing so manually doesn't make sense if we test out schools with 100+ students using busses.
+
+this process needs to be automated but having the ability to review and edit the psuedo-randomly placed pins on the map
+we need to make sure the pins are placed on apartments or buildings and picked according to a seed, density-zones, like the
+probability distribution needs to be realistic as in really close to the school is less likely to enroll in a bus than someone
+farther away but someone who is very far away is very unlikely to be enrolled in the school, there's a goldilock zone.
+
+im thinking like having a cumm. probability of "areas" when it comes to the student home location distribution
+ex: for a school in maadi the distribution might look like: maadi -> 0.5, helwan ->0.2, masr el adeema -> 0.1, other areas -> 0.2
+and within each area we apply like the goldilock distribution thing, like make it more likely to choose a home in maadi that's 
+30 min direct drive away than 5 min.
+
+that would require:
+defining areas and borders (is the borders for the districts available or do they have to be done manually?)
+
+
+also the input file has like two different concerns:
+1- config: constraints, algorithm selection and metadata
+2- the dataset itself (students, buses, school, and routes, [and new location incase of change location mode])
+
+tanget step:
+hardcoded constants in run_algorithm i think it would make more sense if it wa part of the input as an optional override
+to a default json file for road speeds config (ie. max_speed, multipliers based on road type)

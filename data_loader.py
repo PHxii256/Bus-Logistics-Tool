@@ -93,13 +93,26 @@ def load_mode1_input(data, G):
     students = _create_students(data.get('students', []))
     constraints = data.get('constraints', {})
     algo_config = data.get('algorithm', {'method': 'alns', 'iterations': 60})
+
+    # Per-student ride-time constraints — tiered: clamp(k*T_direct, floor, ceiling)
+    ride_time_multiplier = constraints.get('ride_time_multiplier', 2.5)
+    floor_minutes        = constraints.get('floor_minutes',        45)
+    ceiling_minutes      = constraints.get('ceiling_minutes',      60)
+    # Legacy flat cap — kept as fallback (= ceiling)
+    route_tmax = constraints.get('route_tmax', ceiling_minutes)
     
     # Create one route per bus, each starting with school start/end stops
     routes = []
-    route_tmax = constraints.get('route_tmax', 90)
     
     for i, (bus_id, bus) in enumerate(buses.items()):
-        route = Route(bus=bus, route_id=f"R{i+1}", route_tmax=route_tmax)
+        route = Route(
+            bus=bus,
+            route_id=f"R{i+1}",
+            route_tmax=route_tmax,
+            ride_time_multiplier=ride_time_multiplier,
+            floor_minutes=floor_minutes,
+            ceiling_minutes=ceiling_minutes,
+        )
         
         # Snap school to nearest node for start/end stops
         school_node = ox.nearest_nodes(G, school_coords['longitude'], school_coords['latitude'])
@@ -183,7 +196,10 @@ def _reconstruct_routes(routes_json, buses_dict, G):
         route = Route(
             bus=bus,
             route_id=route_data.get('id'),
-            route_tmax=route_data.get('route_tmax', 90)
+            route_tmax=route_data.get('route_tmax', 75),
+            ride_time_multiplier=route_data.get('ride_time_multiplier', 2.5),
+            floor_minutes=route_data.get('floor_minutes',   45),
+            ceiling_minutes=route_data.get('ceiling_minutes', 60),
         )
         route.total_distance = route_data.get('total_distance_km', 0)
         route.total_time = route_data.get('total_time_minutes', 0)
@@ -305,6 +321,9 @@ def serialize_routes(routes, buses, school_coords, unserved_students=None, graph
             "id": route.route_id,
             "bus_id": route_bus_id,
             "route_tmax": route.route_tmax,
+            "ride_time_multiplier": getattr(route, 'ride_time_multiplier', 2.5),
+            "floor_minutes":        getattr(route, 'floor_minutes',        45),
+            "ceiling_minutes":      getattr(route, 'ceiling_minutes',      60),
             "total_distance_km": round(route.total_distance, 2),
             "total_time_minutes": round(route.total_time, 2),
             "detour_time_used_today": round(route.detour_time_used, 2),
@@ -350,6 +369,10 @@ def print_input_summary(students, buses, routes, school_coords):
     
     print(f"\nRoutes: {len(routes)}")
     for route in routes:
-        print(f"  {route.route_id}: {len(route.stops)} stops, Tmax={route.route_tmax}min, capacity={route.bus.capacity}")
+        k       = getattr(route, 'ride_time_multiplier', 2.5)
+        floor_m = getattr(route, 'floor_minutes',        45)
+        ceil_m  = getattr(route, 'ceiling_minutes',      60)
+        print(f"  {route.route_id}: {len(route.stops)} stops, "
+              f"ride cap clamp({k}x, >={floor_m} min, <=direct+{ceil_m} min), capacity={route.bus.capacity}")
     
     print(f"\n{'='*80}\n")

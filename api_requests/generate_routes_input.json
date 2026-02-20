@@ -76,12 +76,9 @@
   ],
 
   "constraints": {
-    "route_tmax": 90,
-    "daily_detour_budget_minutes": 5,
-    "cairo_factor": {
-      "arterial_speed_multiplier": 0.4,
-      "residential_speed_multiplier": 0.7
-    }
+    "ride_time_multiplier": 2.5,
+    "floor_minutes": 45,
+    "ceiling_minutes": 60
   },
 
   "algorithm": {

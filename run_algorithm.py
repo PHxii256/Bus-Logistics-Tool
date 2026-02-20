@@ -447,4 +447,4 @@ def main(input_file='api_requests/generate_routes_input.json'):
 
 
 if __name__ == '__main__':
-    main('api_requests/change_location_input.json')
+    main('api_requests/generate_routes_input.json')

@@ -278,7 +278,8 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
             cost, is_valid, _ = res
             if not is_valid: continue
             
-            valid, _, _ = validate_permanent_student(eval_stop, route, pos, cost, graph)
+            valid, _, _ = validate_permanent_student(eval_stop, route, pos, cost, graph,
+                                                     new_student=student)
             if valid:
                 # Add walk penalty to insertion cost
                 walk_penalty, walk_m, over_limit = calculate_walk_penalty(

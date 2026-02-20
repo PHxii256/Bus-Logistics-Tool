@@ -1,0 +1,14 @@
+1- do all bus start from the school? should we add flexability to the starting points?
+2- total travel time assumptions: over-estimate vs under-estimate? does it affect / is related to a* part?
+currently we are over estimating (at least from the test points so far) compared to the gMaps
+estimate at the evening.
+
+this matter more i think when we had the fixed route level Tmax not per student, since in route level Tmax
+we break up the route or not accept more students in the route when we reach Tmax.
+
+if we overestimate: we may not take in students we otherwise couldve packed into the route, decreasing the effiency
+if we underestimate: we may produce a route that takes longer in reality than the route's Tmax, leading to an unfeasible solution
+when it comes to satisying the constraints (not sure how we would deal with that if we had a sort of retry mechanism)
+
+but since we eleminate route level tMax and instead compare between direct time to school given our formulas for calculating time 
+vs time since boarding the bus it makes the actual value of the time estimate less relevant when it comes to route packing effiency(?)

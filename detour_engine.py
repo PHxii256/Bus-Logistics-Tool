@@ -44,7 +44,7 @@ def haversine_walk_distance(lat1, lon1, lat2, lon2):
     R = 6371000  # Earth radius in meters
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
+    dphi = math.radians(lon2 - lon1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
@@ -222,7 +222,7 @@ def get_heuristic_time(u, v, graph, max_speed_kmh=80):
     
     # Simple Haversine approx
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
+    dphi = math.radians(lon2 - lon1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     dist_m = 2 * 6371000 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
@@ -814,7 +814,55 @@ def calculate_student_ride_time_potential(route, new_stop, insert_position, grap
     return ride_time
 
 
-def is_route_safe(route, graph, walk_distance_limits):
+def calculate_afternoon_ride_time_potential(route, new_stop, insert_position, graph,
+                                            target_stop=None):
+    """Compute the PM ride time for a student in the reversed route after a potential insertion.
+    
+    Afternoon route = morning route with pickup stops reversed:
+        [School, Stop_n, ..., Stop_1, School]
+    A student's afternoon ride = time from school to their stop in the reversed sequence.
+    Students near school in the morning (last pickup) are dropped off FIRST in the afternoon.
+    
+    Args:
+        route: Route object (morning direction)
+        new_stop: Stop being inserted
+        insert_position: Position in morning sequence
+        graph: NetworkX graph
+        target_stop: Which stop to measure for; None → new_stop itself
+    
+    Returns:
+        float: Afternoon ride time in minutes
+    """
+    temp_stops = list(route.stops)
+    temp_stops.insert(insert_position, new_stop)
+
+    # Reverse the interior pickup stops; keep school at start/end
+    interior = temp_stops[1:-1][::-1]
+    afternoon_stops = [temp_stops[0]] + interior + [temp_stops[-1]]
+
+    target = target_stop if target_stop is not None else new_stop
+
+    # Find target in afternoon sequence (match by identity first, then node_id)
+    target_idx = -1
+    for i, s in enumerate(afternoon_stops):
+        if s is target or (target_stop is None and s.node_id == new_stop.node_id):
+            target_idx = i
+            break
+
+    if target_idx <= 0:
+        return 0.0  # school position or not found
+
+    ride_time = 0.0
+    for i in range(target_idx):
+        u = afternoon_stops[i].node_id
+        v = afternoon_stops[i + 1].node_id
+        t = _MATRIX_CACHE.get((u, v), None)
+        if t is None:
+            _, t = find_shortest_path_with_turns(graph, u, v)
+        if t == float('inf'):
+            return 9999.0
+        ride_time += t
+    return ride_time
     """Check if all students on the route can reach their stops safely.
     
     A route is safe if every student can reach their assigned stop via
@@ -926,12 +974,128 @@ def validate_temporary_detour(new_stop, route, delta_time_minutes, daily_budget=
     return True, remaining, f"Temporary detour accepted ({total_if_added:.2f}/{daily_budget} min used)"
 
 
-def validate_permanent_student(new_stop, route, insert_position, delta_time_minutes, graph):
+def compute_direct_time(student, school_node, graph):
+    """Compute direct drive time from student's home to school (minutes).
+    
+    Uses the precomputed distance matrix when available, falling back to
+    an on-demand A* search.  Result is cached on the student object so
+    subsequent calls are O(1).
+    
+    Args:
+        student: Student object (must have .coords)
+        school_node: OSM node ID of the school
+        graph: NetworkX road network
+    
+    Returns:
+        float: Travel time in minutes (direct, no detours)
+    """
+    if student.direct_time_to_school is not None:
+        return student.direct_time_to_school
+
+    lat, lon = student.coords
+    student_node = ox.nearest_nodes(graph, lon, lat)
+
+    # Check precomputed matrix first (fast, no graph search)
+    cached = _MATRIX_CACHE.get((student_node, school_node), None)
+    if cached is not None and cached < float('inf'):
+        student.direct_time_to_school = cached
+        return cached
+
+    # Fallback: on-demand A* search
+    _, t = find_shortest_path_with_turns(graph, student_node, school_node)
+    if t == float('inf'):
+        # Last-resort: try nearest reachable node
+        t = float('inf')
+    student.direct_time_to_school = t
+    return t
+
+
+def compute_afternoon_direct_time(student, school_node, graph):
+    """Compute direct drive time from school to student's home (afternoon direction).
+    
+    Due to one-way streets, this may differ from compute_direct_time.
+    Cached on student.direct_time_from_school for O(1) repeat calls.
+    """
+    if getattr(student, 'direct_time_from_school', None) is not None:
+        return student.direct_time_from_school
+
+    lat, lon = student.coords
+    student_node = ox.nearest_nodes(graph, lon, lat)
+
+    cached = _MATRIX_CACHE.get((school_node, student_node), None)
+    if cached is not None and cached < float('inf'):
+        student.direct_time_from_school = cached
+        return cached
+
+    _, t = find_shortest_path_with_turns(graph, school_node, student_node)
+    student.direct_time_from_school = t
+    return t
+
+
+def compute_student_tmax(student, school_node, G,
+                          multiplier=2.5,
+                          floor_minutes=45,
+                          ceiling_minutes=60):  # changed default 30 → 60
+    """
+    Tiered per-student ride time cap (morning direction: home -> school):
+
+        T_max(s) = clamp(k * T_direct, floor_minutes, T_direct + ceiling_minutes)
+
+    ceiling_minutes = max EXTRA minutes allowed on top of T_direct.
+    The absolute upper bound grows with distance, not a fixed number.
+
+    Default parameters:  k=2.5,  floor=45,  ceiling_extra=60
+    ┌─────────────┬──────────────┬──────────────┬─────────────┬──────────────────────┐
+    │  T_direct   │  k×T_direct  │  T_d+ceiling │  Effective  │  Which rule binds    │
+    ├─────────────┼──────────────┼──────────────┼─────────────┼──────────────────────┤
+    │   2  min    │     5  min   │    62  min   │   45  min   │ FLOOR (student nearby)│
+    │   5  min    │    12.5 min  │    65  min   │   45  min   │ FLOOR                │
+    │  10  min    │    25  min   │    70  min   │   45  min   │ FLOOR                │
+    │  18  min    │    45  min   │    78  min   │   45  min   │ FLOOR / RATIO tie    │
+    │  20  min    │    50  min   │    80  min   │   50  min   │ RATIO (2.5x binds)   │
+    │  25  min    │    62.5 min  │    85  min   │   62.5 min  │ RATIO                │
+    │  30  min    │    75  min   │    90  min   │   75  min   │ RATIO                │
+    │  40  min    │   100  min   │   100  min   │  100  min   │ RATIO / CEILING tie  │
+    │  45  min    │   112.5 min  │   105  min   │  105  min   │ CEILING (+60 binds)  │
+    │  60  min    │   150  min   │   120  min   │  120  min   │ CEILING              │
+    │  90  min    │   225  min   │   150  min   │  150  min   │ CEILING              │
+    └─────────────┴──────────────┴──────────────┴─────────────┴──────────────────────┘
+
+    Breakpoints (where control transfers between rules):
+      FLOOR → RATIO  at  T_direct = floor / k = 45 / 2.5 = 18 min
+      RATIO → CEILING at  T_direct = ceiling / (k-1) = 60 / 1.5 = 40 min
+    """
+    t_direct = compute_direct_time(student, school_node, G)
+
+    if t_direct == float('inf'):
+        return float('inf')
+    if t_direct <= 0:
+        return floor_minutes
+
+    raw_cap          = multiplier * t_direct
+    absolute_ceiling = t_direct + ceiling_minutes
+    personal_tmax    = max(floor_minutes, min(raw_cap, absolute_ceiling))
+
+    # Cache on student for visualization and logging
+    student.direct_time_to_school = t_direct
+    student.personal_tmax         = personal_tmax
+    return personal_tmax
+
+
+def validate_permanent_student(new_stop, route, insert_position, delta_time_minutes, graph,
+                               new_student=None):
     """Validate if a permanent student can be added to the route.
     
-    A permanent student assignment is accepted if it doesn't cause the
-    longest student ride time (from first pickup to school) to exceed route_tmax,
-    and bus capacity is available.
+    Uses per-student ride-time caps when the student object is available:
+        T_ride \u2264 min(k * T_direct,  T_direct + Δmax)
+    Falls back to the flat route_tmax when no student object is provided.
+    
+    Also checks that no existing student on the route has their personal
+    cap violated by the insertion (inserting a stop after them increases
+    their ride time).
+    
+    A permanent student assignment is accepted if it doesn't violate any
+    ride-time constraint and bus capacity is available.
     
     Args:
         new_stop: Stop object for the new student
@@ -939,6 +1103,7 @@ def validate_permanent_student(new_stop, route, insert_position, delta_time_minu
         insert_position: Where the stop is being inserted
         delta_time_minutes: Time cost of this insertion (for info)
         graph: NetworkX road network
+        new_student: Optional Student object; enables per-student ride-time caps
         
     Returns:
         Tuple of (valid: bool, student_ride_time: float, reason: str)
@@ -946,14 +1111,101 @@ def validate_permanent_student(new_stop, route, insert_position, delta_time_minu
     # Check 1: Bus capacity
     if route.get_student_count() >= route.bus.capacity:
         return False, route.total_time, f"Bus at capacity ({route.get_student_count()}/{route.bus.capacity})"
-    
-    # Check 2: Student ride time limit (Tmax)
-    # The requirement is that the first student boarded doesn't spend more than Tmax
+
+    school_node  = route.stops[-1].node_id
+    k            = getattr(route, 'ride_time_multiplier', 2.5)
+    floor_min    = getattr(route, 'floor_minutes',        45)
+    ceiling_min  = getattr(route, 'ceiling_minutes',      60)  # extra minutes over direct
+
+    # Check 2: New student's personal ride-time cap (bidirectional fairness rule)
+    # A route is only rejected for ride time if the constraint is broken in BOTH
+    # the morning (home→school) AND the afternoon (school→home reversed route).
     new_student_ride_time = calculate_student_ride_time_potential(route, new_stop, insert_position, graph)
-    
-    if new_student_ride_time > route.route_tmax:
-        return False, new_student_ride_time, f"Student ride time exceeds Tmax: {new_student_ride_time:.1f} > {route.route_tmax} min"
-    
+
+    if new_student is not None:
+        morning_cap     = compute_student_tmax(new_student, school_node, graph, k, floor_min, ceiling_min)
+        morning_bad     = new_student_ride_time > morning_cap
+
+        if morning_bad:
+            # Compute afternoon ride for the same student
+            afternoon_ride = calculate_afternoon_ride_time_potential(
+                route, new_stop, insert_position, graph)
+            t_direct_aft   = compute_afternoon_direct_time(new_student, school_node, graph)
+            if t_direct_aft > 0 and t_direct_aft < float('inf'):
+                afternoon_cap = max(floor_min, min(k * t_direct_aft, t_direct_aft + ceiling_min))
+            else:
+                afternoon_cap = morning_cap  # symmetric fallback
+
+            afternoon_bad = afternoon_ride > afternoon_cap
+
+            if afternoon_bad:
+                t_direct = compute_direct_time(new_student, school_node, graph)
+                return (False, new_student_ride_time,
+                        f"Ride cap exceeded in BOTH directions: "
+                        f"AM {new_student_ride_time:.1f}>{morning_cap:.1f} min, "
+                        f"PM {afternoon_ride:.1f}>{afternoon_cap:.1f} min "
+                        f"(direct AM={t_direct:.1f}, PM={t_direct_aft:.1f}, "
+                        f"clamp({k}×, {floor_min}, +{ceiling_min}))")
+            # Morning bad but afternoon OK — acceptable: student gets a short PM ride
+    else:
+        # Fallback: flat route_tmax
+        if new_student_ride_time > route.route_tmax:
+            return (False, new_student_ride_time,
+                    f"Student ride time exceeds Tmax: {new_student_ride_time:.1f} > {route.route_tmax} min")
+
+    # Check 3: Existing students — only reject if insertion pushes them over cap in BOTH directions.
+    if new_student is not None:
+        for stop in route.stops:
+            if stop.stop_type == 'school':
+                continue
+            for existing_student in stop.students:
+                t_d = compute_direct_time(existing_student, school_node, graph)
+                if t_d == float('inf') or t_d <= 0:
+                    continue
+                ex_floor   = getattr(existing_student, 'floor_minutes',   floor_min)
+                ex_ceiling = getattr(existing_student, 'ceiling_minutes', ceiling_min)
+                existing_morning_cap = max(ex_floor, min(k * t_d, t_d + ex_ceiling))
+
+                stop_idx = route.stops.index(stop) if stop in route.stops else -1
+                if stop_idx != -1 and stop_idx < insert_position:
+                    continue  # new stop inserted after them — morning ride unaffected
+
+                # Build the post-insertion stop list and find this student's position
+                temp_stops = list(route.stops)
+                temp_stops.insert(insert_position, new_stop)
+                student_stop_idx_in_temp = next(
+                    (ti for ti, ts in enumerate(temp_stops) if ts is stop), -1)
+                if student_stop_idx_in_temp == -1:
+                    continue
+
+                # Morning ride check
+                morning_ride_check = 0.0
+                for si in range(student_stop_idx_in_temp, len(temp_stops) - 1):
+                    u = temp_stops[si].node_id
+                    v = temp_stops[si + 1].node_id
+                    t = _MATRIX_CACHE.get((u, v), None)
+                    if t is None:
+                        _, t = find_shortest_path_with_turns(graph, u, v)
+                    if t == float('inf'):
+                        morning_ride_check = float('inf')
+                        break
+                    morning_ride_check += t
+
+                if morning_ride_check > existing_morning_cap:
+                    # Check afternoon before rejecting
+                    aft_ride_check = calculate_afternoon_ride_time_potential(
+                        route, new_stop, insert_position, graph, target_stop=stop)
+                    t_d_aft = compute_afternoon_direct_time(existing_student, school_node, graph)
+                    if t_d_aft > 0 and t_d_aft < float('inf'):
+                        aft_cap = max(ex_floor, min(k * t_d_aft, t_d_aft + ex_ceiling))
+                    else:
+                        aft_cap = existing_morning_cap
+                    if aft_ride_check > aft_cap:
+                        return (False, morning_ride_check,
+                                f"Insertion pushes {existing_student.id} over cap in BOTH directions: "
+                                f"AM {morning_ride_check:.1f}>{existing_morning_cap:.1f}, "
+                                f"PM {aft_ride_check:.1f}>{aft_cap:.1f} min")
+
     return True, new_student_ride_time, "Permanent student accepted"
 
 
@@ -1129,7 +1381,8 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
                         continue
                 else:  # permanent
                     valid, new_ride_time, constraint_reason = validate_permanent_student(
-                        eval_stop, route, position, delta_time, graph
+                        eval_stop, route, position, delta_time, graph,
+                        new_student=new_student
                     )
                     if not valid:
                         continue
@@ -1258,6 +1511,9 @@ def insert_with_2opt(new_student, existing_routes, graph, detour_type='temporary
     # Insert the stop
     if result['is_new_stop']:
         route.stops.insert(position, new_stop)
+    
+    # Set student assignment type
+    new_student.assignment = detour_type  # "temporary" or "permanent"
     new_stop.add_student(new_student)
     
     # Step 2: 2-opt improvement on the affected route

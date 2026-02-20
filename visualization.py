@@ -21,7 +21,9 @@ from detour_engine import (
     find_shortest_path_with_turns,
     walk_distance_on_roads,
     walk_path_on_roads,
-    calculate_walk_penalty
+    calculate_walk_penalty,
+    compute_direct_time,
+    compute_student_tmax,
 )
 
 
@@ -252,6 +254,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             
             # Calculate Direct Ride Time (from student home node to school)
             direct_time = "N/A"
+            direct_time_mins = None
             try:
                 student_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
                 school_node = route.stops[-1].node_id
@@ -260,6 +263,49 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                 direct_time = f"{direct_time_mins:.1f} min"
             except:
                 pass
+
+            # Per-student ride-time cap and ratio (tiered: clamp(k*T_direct, floor, ceiling))
+            ride_cap_html = ""
+            if direct_time_mins is not None and direct_time_mins > 0:
+                k           = getattr(route, 'ride_time_multiplier', 2.5)
+                floor_min   = getattr(route, 'floor_minutes',        45)
+                ceiling_min = getattr(route, 'ceiling_minutes',      30)  # extra over direct
+                raw_cap          = k * direct_time_mins
+                absolute_ceiling = direct_time_mins + ceiling_min
+                student_tmax     = max(floor_min, min(raw_cap, absolute_ceiling))
+
+                # Which tier is active?
+                if raw_cap <= floor_min:
+                    tier_label = f'floor ({floor_min} min)'
+                    tier_color = '#888'
+                elif raw_cap >= absolute_ceiling:
+                    tier_label = f'direct+{ceiling_min} min ({absolute_ceiling:.0f} min)'
+                    tier_color = '#c0392b'
+                else:
+                    tier_label = f'{k}× direct'
+                    tier_color = '#2980b9'
+
+                ratio = ride_time / direct_time_mins
+                if ratio <= 1.5:
+                    ratio_color = 'green'
+                elif ratio <= k:
+                    ratio_color = 'darkorange'
+                else:
+                    ratio_color = 'red'
+
+                usage_pct = min(100, int(ride_time / student_tmax * 100)) if student_tmax > 0 else 0
+                ride_cap_html = (
+                    f'<div style="margin-top:4px; font-size:11px;">'
+                    f'  <b>Ride Cap:</b> '
+                    f'  <b style="color:{ratio_color};">{ride_time:.1f}</b> / '
+                    f'  <b>{student_tmax:.1f} min</b>'
+                    f'  &nbsp;<span style="color:{ratio_color};">({ratio:.2f}× direct)</span><br>'
+                    f'  <span style="color:{tier_color};">Active tier: {tier_label}</span>'
+                    f'  <div style="background:#eee;border-radius:3px;height:6px;margin-top:2px;">'
+                    f'    <div style="background:{ratio_color};width:{usage_pct}%;height:6px;border-radius:3px;"></div>'
+                    f'  </div>'
+                    f'</div>'
+                )
 
             # Calculate walking distance along roads (undirected - ignores one-way)
             # Pedestrians walk on sidewalks/roads without U-turn or direction rules
@@ -314,6 +360,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                         Assigned Route: [ {route.route_id} ]<br>
                         Actual Ride Time: {ride_time:.1f} min<br>
                         Direct Potential: {direct_time}<br>
+                        {ride_cap_html}
                         Walk to Stop: {walk_info} {walk_warning_html}
                     </div>
                 </div>
@@ -438,7 +485,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             <p style="margin: 0; font-size: 12px;">
                 Stops: {len(route.stops) - 2} | Students: {student_count} / {total_pool}<br>
                 Distance: {route.total_distance:.2f} km<br>
-                Max Student Ride Time: {ride_time:.1f} / {route.route_tmax} min (Total: {route.total_time:.1f})
+                Max Student Ride Time: {ride_time:.1f} min<br>
             </p>
         </div>
         """

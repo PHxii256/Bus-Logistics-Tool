@@ -35,6 +35,10 @@ class Student:
         # Date range for temporary assignments (ISO strings or None)
         self.valid_from = valid_from
         self.valid_until = valid_until
+        # Cached direct travel time (minutes) from home node to school node
+        # Computed once during precompute phase; used for per-student Tmax constraint
+        self.direct_time_to_school   = None  # home → school  (morning)
+        self.direct_time_from_school = None  # school → home  (afternoon, may differ on one-way streets)
 
         
 
@@ -113,13 +117,18 @@ class Route:
     like distance, time, and cost. The route tracks temporary detour time
     used during the day.
     """
-    def __init__(self, bus, route_id=None, route_tmax=60):
+    def __init__(self, bus, route_id=None, route_tmax=60,
+                 ride_time_multiplier=2.5, floor_minutes=45, ceiling_minutes=30):
         """Initialize a Route.
         
         Args:
             bus: Bus object assigned to this route
             route_id: Optional unique identifier for the route
-            route_tmax: Maximum acceptable total trip time in minutes (default 60)
+            route_tmax: Legacy flat Tmax (minutes); used as fallback only
+            ride_time_multiplier: Ratio cap k; cap = clamp(k*T_direct, floor, T_direct+ceiling)
+            floor_minutes: Minimum cap — ensures nearby students don't over-penalise fleet (default 45)
+            ceiling_minutes: Max EXTRA minutes allowed beyond direct route time (default 30)
+                             Absolute cap = T_direct + ceiling_minutes
         """
         self.bus = bus
         self.stops = [] # List of Stop objects in order
@@ -127,6 +136,10 @@ class Route:
         self.total_time = 0  # Total travel time in minutes
         self.route_id = route_id
         self.route_tmax = route_tmax
+        # Per-student ride time constraint: T_max = clamp(k * T_direct, floor_minutes, ceiling_minutes)
+        self.ride_time_multiplier = ride_time_multiplier
+        self.floor_minutes        = floor_minutes
+        self.ceiling_minutes      = ceiling_minutes
         self.detour_time_used = 0  # Track temporary detour time used today
         
     def get_revenue(self):

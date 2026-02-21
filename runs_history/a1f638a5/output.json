@@ -1,36 +1,9 @@
 {
-  "meta": {
-    "mode": "change_location",
-    "student_id": "S1",
-    "new_location": {
-      "latitude": 29.9615107,
-      "longitude": 31.2762834,
-      "reason": "Visiting grandparent"
-    },
-    "change_type": "temporary",
-    "valid_from": "2026-02-13",
-    "valid_until": "2026-02-13",
-
-    "graph": {
-      "bbox": [31.229084, 29.925630, 31.331909, 29.991682]
-    },
-
-    "constraints": {
-      "daily_detour_budget_minutes": 5
-    },
-
-    "algorithm": {
-      "method": "2opt"
-    }
-  },
-
-  "data": {
-    "school": {
+  "school": {
     "name": "Victory College School",
     "latitude": 29.964406,
     "longitude": 31.270319
   },
-
   "buses": [
     {
       "id": "BUS_1",
@@ -47,17 +20,16 @@
       "var_cost_km": 7.0
     }
   ],
-
   "routes": [
     {
       "id": "R1",
       "bus_id": "BUS_1",
-      "route_tmax": 90,
+      "route_tmax": 60,
       "ride_time_multiplier": 2.5,
       "floor_minutes": 45,
       "ceiling_minutes": 60,
-      "total_distance_km": 16.12,
-      "total_time_minutes": 74.54,
+      "total_distance_km": 16.25,
+      "total_time_minutes": 72.81,
       "detour_time_used_today": 0,
       "path": [
         {
@@ -83,27 +55,7 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 15.1
-            }
-          ]
-        },
-        {
-          "node_id": 9992995850631276834,
-          "latitude": 29.958652751946577,
-          "longitude": 31.276961091398704,
-          "type": "pickup",
-          "students": [
-            {
-              "id": "S1",
-              "home_latitude": 29.958506,
-              "home_longitude": 31.276834,
-              "school_stage": "ELEMENTARY",
-              "age": 10,
-              "fee": 100.0,
-              "assignment": "permanent",
-              "valid_from": null,
-              "valid_until": null,
-              "walk_distance": 20.4
+              "walk_distance": 22.8
             }
           ]
         },
@@ -123,7 +75,27 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 25.8
+              "walk_distance": 21.8
+            }
+          ]
+        },
+        {
+          "node_id": 9992995850631276834,
+          "latitude": 29.958652751946577,
+          "longitude": 31.276961091398704,
+          "type": "pickup",
+          "students": [
+            {
+              "id": "S1",
+              "home_latitude": 29.958506,
+              "home_longitude": 31.276834,
+              "school_stage": "ELEMENTARY",
+              "age": 10,
+              "fee": 100.0,
+              "assignment": "permanent",
+              "valid_from": null,
+              "valid_until": null,
+              "walk_distance": 18.7
             }
           ]
         },
@@ -143,7 +115,7 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 72.1
+              "walk_distance": 95.0
             }
           ]
         },
@@ -163,7 +135,7 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 179.5
+              "walk_distance": 251.6
             }
           ]
         },
@@ -183,7 +155,7 @@
               "assignment": "permanent",
               "valid_from": null,
               "valid_until": null,
-              "walk_distance": 47.3
+              "walk_distance": 70.2
             }
           ]
         },
@@ -196,6 +168,6 @@
         }
       ]
     }
-  ]
-  }
+  ],
+  "unserved_students": []
 }

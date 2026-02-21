@@ -1,7 +1,27 @@
 {
-  "mode": "generate_routes",
+  "meta": {
+    "mode": "generate_routes",
+    "description": "Victory College School — 6 students, 2 buses",
 
-  "school": {
+    "graph": {
+      "bbox": [31.229084, 29.925630, 31.331909, 29.991682]
+    },
+
+    "constraints": {
+      "ride_time_multiplier": 2.5,
+      "floor_minutes": 45,
+      "ceiling_minutes": 60,
+      "daily_detour_budget_minutes": 5
+    },
+
+    "algorithm": {
+      "method": "alns",
+      "iterations": 60
+    }
+  },
+
+  "data": {
+    "school": {
     "name": "Victory College School",
     "latitude": 29.964406,
     "longitude": 31.270319
@@ -73,16 +93,6 @@
       "school_stage": "ELEMENTARY",
       "fee": 100.0
     }
-  ],
-
-  "constraints": {
-    "ride_time_multiplier": 2.5,
-    "floor_minutes": 45,
-    "ceiling_minutes": 60
-  },
-
-  "algorithm": {
-    "method": "alns",
-    "iterations": 60
+  ]
   }
 }

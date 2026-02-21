@@ -73,6 +73,13 @@ def _create_students(student_data_list):
 # MODE 1: Generate Routes (initial optimization)
 # ============================================================================
 
+def _unpack_input(data):
+    """Return (meta, dataset) from the {meta, data} input format."""
+    if 'meta' not in data or 'data' not in data:
+        raise ValueError("Input file must have top-level 'meta' and 'data' fields.")
+    return data['meta'], data['data']
+
+
 def load_mode1_input(data, G):
     """Load Mode 1 (generate_routes) input.
     
@@ -83,17 +90,19 @@ def load_mode1_input(data, G):
     Returns:
         Tuple of (students, buses_dict, routes, school_coords, constraints, algo_config)
     """
-    school = data.get('school', {})
+    meta, dataset = _unpack_input(data)
+
+    school = dataset.get('school', {})
     school_coords = {
         'latitude': school.get('latitude'),
         'longitude': school.get('longitude'),
         'name': school.get('name', 'School')
     }
     
-    buses = _create_buses_dict(data.get('buses', []))
-    students = _create_students(data.get('students', []))
-    constraints = data.get('constraints', {})
-    algo_config = data.get('algorithm', {'method': 'alns', 'iterations': 60})
+    buses = _create_buses_dict(dataset.get('buses', []))
+    students = _create_students(dataset.get('students', []))
+    constraints = meta.get('constraints', {})
+    algo_config = meta.get('algorithm', {'method': 'alns', 'iterations': 60})
 
     # Per-student ride-time constraints — tiered: clamp(k*T_direct, floor, ceiling)
     ride_time_multiplier = constraints.get('ride_time_multiplier', 2.5)
@@ -148,26 +157,28 @@ def load_mode2_input(data, G):
         Tuple of (student_id, new_coords, change_type, valid_from, valid_until,
                   algo_config, routes, all_students, buses_dict, school_coords)
     """
-    school = data.get('school', {})
+    meta, dataset = _unpack_input(data)
+
+    school = dataset.get('school', {})
     school_coords = {
         'latitude': school.get('latitude'),
         'longitude': school.get('longitude'),
         'name': school.get('name', 'School')
     }
     
-    buses = _create_buses_dict(data.get('buses', []))
+    buses = _create_buses_dict(dataset.get('buses', []))
     
     # Reconstruct routes from unified schema
-    routes, all_students = _reconstruct_routes(data.get('routes', []), buses, G)
+    routes, all_students = _reconstruct_routes(dataset.get('routes', []), buses, G)
     
-    # Extract change request
-    student_id = data.get('student_id')
-    new_loc = data.get('new_location', {})
-    new_coords = (new_loc.get('latitude'), new_loc.get('longitude'))
-    change_type = data.get('change_type', 'temporary')
-    valid_from = data.get('valid_from')
-    valid_until = data.get('valid_until')
-    algo_config = data.get('algorithm', {'method': 'cheapest_insertion'})
+    # Extract change request (all from meta)
+    student_id  = meta.get('student_id')
+    new_loc     = meta.get('new_location', {})
+    new_coords  = (new_loc.get('latitude'), new_loc.get('longitude'))
+    change_type = meta.get('change_type', 'temporary')
+    valid_from  = meta.get('valid_from')
+    valid_until = meta.get('valid_until')
+    algo_config = meta.get('algorithm', {'method': 'cheapest_insertion'})
     
     return (student_id, new_coords, change_type, valid_from, valid_until,
             algo_config, routes, all_students, buses, school_coords)

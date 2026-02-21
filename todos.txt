@@ -48,10 +48,10 @@ that would require:
 defining areas and borders (is the borders for the districts available or do they have to be done manually?)
 
 
-also the input file has like two different concerns:
+also the input file has like two different concerns (Done):
 1- config: constraints, algorithm selection and metadata
 2- the dataset itself (students, buses, school, and routes, [and new location incase of change location mode])
 
-tanget step:
-hardcoded constants in run_algorithm i think it would make more sense if it wa part of the input as an optional override
+i think it would be better if we had like a field for meta and a field for data within the json with the meta being at the top of the file
+also hardcoded constants in run_algorithm i think it would make more sense if it wa part of the input as an optional override
 to a default json file for road speeds config (ie. max_speed, multipliers based on road type)

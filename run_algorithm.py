@@ -43,12 +43,6 @@ def _input_hash(data: dict) -> str:
     return hashlib.md5(canonical.encode()).hexdigest()[:8]
 
 
-def _slug(text: str) -> str:
-    """Turn an arbitrary string into a safe folder-name component."""
-    import re
-    return re.sub(r'[^a-zA-Z0-9]+', '_', text).strip('_').lower()[:30]
-
-
 def save_run(input_data: dict, output_data: dict, report_data: dict,
             map_files: dict = None):
     """
@@ -90,44 +84,73 @@ def save_run(input_data: dict, output_data: dict, report_data: dict,
 # GRAPH SETUP (shared by both modes)
 # ============================================================================
 
-def setup_graph():
-    """Download road network and apply safety/speed tags."""
-    print("Downloading road network...")
-    G = ox.graph_from_bbox(
-        [31.229084, 29.925630, 31.331909, 29.991682],
-        network_type='drive'
-    )
+_DEFAULT_BBOX = [31.229084, 29.925630, 31.331909, 29.991682]
+_ROAD_SPEEDS_CONFIG_PATH = 'road_speeds_config.json'
 
-    print("Applying safety tags (Cairo Factor)...")
+
+def _load_road_speeds(override: dict = None) -> dict:
+    """Load road speed config, merging defaults with any per-run override.
+
+    Priority: override (from meta.road_speeds) > road_speeds_config.json > built-in fallback
+    """
+    # Built-in fallback (matches road_speeds_config.json defaults)
+    builtin = {
+        'default_speed_kph': 30,
+        'road_types': {
+            'primary':       {'speed_multiplier': 0.8, 'safe_to_cross': False},
+            'trunk':         {'speed_multiplier': 0.8, 'safe_to_cross': False},
+            'secondary':     {'speed_multiplier': 0.6, 'safe_to_cross': False},
+            'tertiary':      {'speed_multiplier': 0.6, 'safe_to_cross': False},
+            'residential':   {'speed_multiplier': 0.3, 'safe_to_cross': True},
+            'living_street': {'speed_multiplier': 0.3, 'safe_to_cross': True},
+            'default':       {'speed_multiplier': 0.2, 'safe_to_cross': True},
+        }
+    }
+    try:
+        with open(_ROAD_SPEEDS_CONFIG_PATH) as f:
+            file_cfg = json.load(f)
+        builtin.update({k: v for k, v in file_cfg.items() if not k.startswith('_')})
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    if override:
+        builtin.update(override)
+    return builtin
+
+
+def setup_graph(meta: dict = None):
+    """Download road network and apply safety/speed tags.
+
+    Args:
+        meta: The 'meta' block from the input JSON. Used to read:
+              - meta.graph.bbox     (optional, defaults to Cairo bbox)
+              - meta.road_speeds    (optional dict, overrides road_speeds_config.json)
+    """
+    graph_cfg    = (meta or {}).get('graph', {})
+    bbox         = graph_cfg.get('bbox', _DEFAULT_BBOX)
+    road_cfg     = _load_road_speeds((meta or {}).get('road_speeds'))
+    road_types   = road_cfg['road_types']
+    default_spd  = road_cfg.get('default_speed_kph', 30)
+
+    print("Downloading road network...")
+    G = ox.graph_from_bbox(bbox, network_type='drive')
+
+    print("Applying road speed config...")
     for u, v, k, data in G.edges(keys=True, data=True):
-        maxspeed = data.get('maxspeed', 30)
+        maxspeed = data.get('maxspeed', default_spd)
         if isinstance(maxspeed, list):
-            try:
-                base_speed = float(maxspeed[0])
-            except (ValueError, TypeError):
-                base_speed = 30
+            try:    base_speed = float(maxspeed[0])
+            except: base_speed = default_spd
         else:
-            try:
-                base_speed = float(maxspeed)
-            except (ValueError, TypeError):
-                base_speed = 30
+            try:    base_speed = float(maxspeed)
+            except: base_speed = default_spd
 
         highway = data.get('highway', 'unclassified')
         if isinstance(highway, list):
             highway = highway[0]
 
-        if highway in ['primary', 'trunk']:
-            data['speed_kph'] = base_speed * 0.8
-            data['is_safe_to_cross'] = False
-        elif highway in ['secondary', 'tertiary']:
-            data['speed_kph'] = base_speed * 0.6
-            data['is_safe_to_cross'] = False
-        elif highway in ['residential', 'living_street']:
-            data['speed_kph'] = base_speed * 0.3
-            data['is_safe_to_cross'] = True
-        else:
-            data['speed_kph'] = base_speed * 0.2
-            data['is_safe_to_cross'] = True
+        cfg = road_types.get(highway, road_types.get('default', {'speed_multiplier': 0.2, 'safe_to_cross': True}))
+        data['speed_kph']       = base_speed * cfg['speed_multiplier']
+        data['is_safe_to_cross'] = cfg['safe_to_cross']
 
         meters_per_min = (data['speed_kph'] * 1000) / 60
         data['travel_time'] = data['length'] / meters_per_min
@@ -548,9 +571,11 @@ def main(input_file='api_requests/generate_routes_input.json'):
     """Main entry point — read input JSON, dispatch to the correct mode."""
     print(f"Loading '{input_file}'...")
     data = load_json(input_file)
-    mode = data.get('mode', 'generate_routes')
 
-    G = setup_graph()
+    meta = data['meta']
+    mode = meta['mode']
+
+    G = setup_graph(meta)
 
     if mode == 'generate_routes':
         return run_generate_routes(data, G, input_file)

@@ -65,6 +65,8 @@ def _create_students(student_data_list):
             valid_from=data.get('valid_from'),
             valid_until=data.get('valid_until')
         )
+        if 'walk_radius_override' in data:
+            student.walk_radius = data['walk_radius_override']
         students.append(student)
     return students
 
@@ -114,6 +116,12 @@ def load_mode1_input(data, G):
     # Create one route per bus, each starting with school start/end stops
     routes = []
     
+    # Snap school ONCE (not per bus) — use BallTree if already built
+    import detour_engine as _det
+    school_node = _det.fast_nearest_node(G, school_coords['longitude'], school_coords['latitude'])
+    school_node_lat = G.nodes[school_node]['y']
+    school_node_lon = G.nodes[school_node]['x']
+    
     for i, (bus_id, bus) in enumerate(buses.items()):
         route = Route(
             bus=bus,
@@ -124,10 +132,8 @@ def load_mode1_input(data, G):
             ceiling_minutes=ceiling_minutes,
         )
         
-        # Snap school to nearest node for start/end stops
-        school_node = ox.nearest_nodes(G, school_coords['longitude'], school_coords['latitude'])
-        node_lat = G.nodes[school_node]['y']
-        node_lon = G.nodes[school_node]['x']
+        node_lat = school_node_lat
+        node_lon = school_node_lon
         
         start_stop = Stop(school_node, node_lat, node_lon,
                           stop_id=f"R{i+1}-Start", stop_type="school")

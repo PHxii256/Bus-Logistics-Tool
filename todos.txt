@@ -1,57 +1,46 @@
-1- do all bus start from the school? should we add flexability to the starting points?
-2- total travel time assumptions: over-estimate vs under-estimate? does it affect / is related to a* part?
-currently we are over estimating (at least from the test points so far) compared to the gMaps
-estimate at the evening.
+IMMEDIATE (validates algorithm before experiments):
+  [x] Parse .bus benchmark files → bus_loader.py adapter
+  [x] Run graph-free mode (Euclidean fallback) on all 10 instances
+  [x] Compare objective values against Lewis paper published results
+      STATUS: DONE — see benchmarks/compare_lewis.py
+      Route count match: 4/10 (exact), 6/10 use 1 extra route.
+      Journey time gap: +189% to +365% vs Lewis best.
+      Root cause: our system visits ~20 stops/route (virtual stop per
+      student); Lewis selects a small subset (~5-8 stops/route) and
+      clusters students at them. Different problem formulations —
+      we solve routing-with-insertion, they solve stop-selection+routing.
+      CONCLUSION: direct objective comparison is not meaningful.
+      Benchmarks validate feasibility (100% served) and scalability,
+      not solution quality parity with Lewis.
+  [x] Record runtime for Brisbane + Adelaide → scalability table
+      STATUS: Done. Brisbane=499s/757students, Adelaide=151s/565students.
 
-this matter more i think when we had the fixed route level Tmax not per student, since in route level Tmax
-we break up the route or not accept more students in the route when we reach Tmax.
+PRIMARY CONTRIBUTION (safety vs efficiency):
+  [x] Build generate_dataset.py
+        - gaussian_annulus distribution (peak_km, sigma_km, min_km, max_km)
+        - highway node filter (no Ring Road snapping)
+        - outputs valid {meta, data} JSON
+        - CLI: --n_students --seed --output
+  [x] Add "unconstrained" mode flag to run_algorithm.py
+        - safe_to_cross = True for ALL road types
+        - walk_limit = 400m flat, no age differentiation
+  [x] Run Experiment 1: safety vs unconstrained (DONE)
+        - n_students=40, 5 seeds, both modes, 20 ALNS iters
+        - constrained: 96% served avg, 397 min avg time
+        - unconstrained: 99% served avg, 254 min avg time
+        - Saved: experiment1_results.csv
+  [x] Run Experiment 2: scalability on Cairo graph (DONE)
+        - n_students ∈ {20, 40, 60, 80, 100}, 20 ALNS iters
+        - runtime: 7s → 14s → 23s → 34s → 14s
+        - Saved: experiment2_results.csv
 
-if we overestimate: we may not take in students we otherwise couldve packed into the route, decreasing the effiency
-if we underestimate: we may produce a route that takes longer in reality than the route's Tmax, leading to an unfeasible solution
-when it comes to satisying the constraints (not sure how we would deal with that if we had a sort of retry mechanism)
+PAPER WRITING (parallel with above):
+  [ ] Document safety constraint formulation
+  [ ] Table: benchmark results vs published
+  [ ] Table: safety vs unconstrained comparison
+  [ ] Figure: scalability runtime plot
+  [ ] Figure: route map example (real Cairo, best seed)
 
-but since we eleminate route level tMax and instead compare between direct time to school given our formulas for calculating time 
-vs time since boarding the bus it makes the actual value of the time estimate less relevant when it comes to route packing effiency(?)
-
-
-answer: its better to overestimate consistently than underestimate (could be calibrated later manually or automatically)
-
-
-next step:
-> save results (done)
-this makes us have a folder for each run, containing input data, 
-output data and html visualisation, each folder should be dedicated for a given input
-so that if we run the algo on the same input twice we dont get a duplicate folder
-all those folder should be in a runs_history folder. also have in the output the total run time and other diagonistic
-results like run time per itteration and best object val and students served and routes created and the busses used have it be
-in report.json for this run
-
-
-> next steps:
-datasets, creating new inputs (datasets) currently is very time consuming
-create a tool to help create the datasets, the most consuming part is selecting reasonable coordinates for student home location
-
-we could have types of datasets of varying density / sparcity and for different school locations in cario.
-doing so manually doesn't make sense if we test out schools with 100+ students using busses.
-
-this process needs to be automated but having the ability to review and edit the psuedo-randomly placed pins on the map
-we need to make sure the pins are placed on apartments or buildings and picked according to a seed, density-zones, like the
-probability distribution needs to be realistic as in really close to the school is less likely to enroll in a bus than someone
-farther away but someone who is very far away is very unlikely to be enrolled in the school, there's a goldilock zone.
-
-im thinking like having a cumm. probability of "areas" when it comes to the student home location distribution
-ex: for a school in maadi the distribution might look like: maadi -> 0.5, helwan ->0.2, masr el adeema -> 0.1, other areas -> 0.2
-and within each area we apply like the goldilock distribution thing, like make it more likely to choose a home in maadi that's 
-30 min direct drive away than 5 min.
-
-that would require:
-defining areas and borders (is the borders for the districts available or do they have to be done manually?)
-
-
-also the input file has like two different concerns (Done):
-1- config: constraints, algorithm selection and metadata
-2- the dataset itself (students, buses, school, and routes, [and new location incase of change location mode])
-
-i think it would be better if we had like a field for meta and a field for data within the json with the meta being at the top of the file
-also hardcoded constants in run_algorithm i think it would make more sense if it wa part of the input as an optional override
-to a default json file for road speeds config (ie. max_speed, multipliers based on road type)
+IF TIME PERMITS:
+  [ ] Real Cairo school dataset (case study section)
+  [ ] gmaps post-optimization display

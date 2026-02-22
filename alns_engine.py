@@ -213,9 +213,9 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
             to_school = _MATRIX_CACHE.get((frontage_node_id, school_node), float('inf'))
             from_school = _MATRIX_CACHE.get((school_node, frontage_node_id), float('inf'))
             if to_school == float('inf') or from_school == float('inf'):
-                import osmnx as ox
+                from detour_engine import fast_nearest_node
                 lat, lon = student.coords
-                center_node = ox.nearest_nodes(graph, lon, lat)
+                center_node = fast_nearest_node(graph, lon, lat)
                 max_walk = get_walk_absolute_max(student.walk_radius)  # Stage-based
                 visited = set()
                 bfs_queue = [(center_node, 0)]

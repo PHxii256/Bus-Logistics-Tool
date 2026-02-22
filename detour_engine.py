@@ -114,10 +114,15 @@ def calculate_walk_penalty(student, stop_node, graph):
     """
     student_lat, student_lon = student.coords
     
+    if graph is None:
+        # In graph-free benchmark mode, we assume the student is already at the stop
+        # or we don't have node coordinates to calculate soft penalties.
+        return 0.0, 0.0, False
+
     try:
         stop_lat = graph.nodes[stop_node]['y']
         stop_lon = graph.nodes[stop_node]['x']
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         return 0.0, 0.0, False
     
     # Haversine: O(1) math, called thousands of times during ALNS
@@ -211,6 +216,55 @@ def calculate_weighted_path_time(graph, path_nodes):
 _path_cache = {}
 _MATRIX_CACHE = {}       # (source, target) -> travel_time in minutes
 _MATRIX_CACHE_LENGTH = {} # (source, target) -> length in meters
+
+# Graph-free mode: pre-registered (lat, lon) -> (node_id, (lat, lon)) mappings.
+# When set, snap_address_to_edge returns immediately without touching OSMnx.
+_SNAP_OVERRIDE = {}  # (lat, lon) -> (node_id, (lat, lon))
+
+# Persistent coordinate snap cache: (lat, lon) -> (vnode_id, (lat, lon))
+# Survives across ALNS runs with same input so ox.nearest_edges is called only once per location.
+_COORD_SNAP_CACHE = {}
+
+# When True, snap_address_to_edge uses ox.nearest_nodes (fast, ~1ms) instead of
+# ox.nearest_edges + edge splitting (~4s on large graphs).  Set this before
+# running experiments on large city graphs.  Results are slightly less precise
+# (snaps to road intersection rather than road edge) but comparisons remain valid.
+_FAST_SNAP_MODE = False
+
+# Pre-built BallTree for fast nearest-node lookup.  Built once per graph to
+# avoid OSMnx rebuilding it (+ converting 609K nodes to GeoDataFrame) on every call.
+_BALL_TREE = None
+_BALL_TREE_GRAPH_ID = None   # id(G) so we detect graph replacement
+_BALL_TREE_NODE_IDS = None
+
+
+def _get_or_build_ball_tree(G):
+    """Return a pre-built (BallTree, node_id_list) for G, building once if needed."""
+    global _BALL_TREE, _BALL_TREE_GRAPH_ID, _BALL_TREE_NODE_IDS
+    g_id = id(G)
+    if _BALL_TREE is not None and _BALL_TREE_GRAPH_ID == g_id:
+        return _BALL_TREE, _BALL_TREE_NODE_IDS
+    from sklearn.neighbors import BallTree
+    import numpy as np
+    node_ids = list(G.nodes())
+    coords_rad = np.deg2rad([[G.nodes[n]['y'], G.nodes[n]['x']] for n in node_ids])
+    _BALL_TREE = BallTree(coords_rad, metric='haversine')
+    _BALL_TREE_GRAPH_ID = g_id
+    _BALL_TREE_NODE_IDS = node_ids
+    print(f'  [snap] BallTree built for {len(node_ids):,} nodes')
+    return _BALL_TREE, _BALL_TREE_NODE_IDS
+
+
+def fast_nearest_node(graph, lon, lat):
+    """Find nearest graph node.  Uses cached BallTree if available (< 0.001s)
+    else falls back to ox.nearest_nodes (~1.4s on 600K-node graphs)."""
+    if _BALL_TREE is not None and _BALL_TREE_GRAPH_ID == id(graph):
+        import numpy as np
+        pt_rad = np.deg2rad([[lat, lon]])
+        _, pos = _BALL_TREE.query(pt_rad, k=1)
+        return _BALL_TREE_NODE_IDS[pos[0][0]]
+    return ox.nearest_nodes(graph, lon, lat)
+
 
 def get_heuristic_time(u, v, graph, max_speed_kmh=80):
     """Admissible heuristic for time-based A*: straight line distance / max speed."""
@@ -328,19 +382,49 @@ def find_shortest_path_with_turns(graph, source, target, weight='travel_time', i
     return None, float('inf')
 
 
-def precalculate_distance_matrix(graph, critical_node_ids):
+def precalculate_distance_matrix(graph, critical_node_ids, fast_mode=False):
     """Pre-calculate path times AND distances between all critical nodes.
-    Uses A* with 180-turn illegal logic. Fills both _MATRIX_CACHE (time)
-    and _MATRIX_CACHE_LENGTH (distance) and _path_cache (path+time).
+
+    fast_mode=False (default): uses A* with 180-turn illegal logic (accurate,
+      but slow on large graphs like Cairo with 600K+ nodes).
+    fast_mode=True: uses NetworkX single-source Dijkstra (no turn penalties,
+      ~50-100x faster on large graphs – suitable for experiments where
+      relative comparison matters more than absolute accuracy).
+
+    Fills _MATRIX_CACHE (travel_time in minutes) and _MATRIX_CACHE_LENGTH (meters).
     """
-    total = len(critical_node_ids) * (len(critical_node_ids) - 1)
-    print(f"Pre-calculating distance matrix for {len(critical_node_ids)} nodes ({total} pairs)...")
+    node_list = list(critical_node_ids)
+    total = len(node_list) * (len(node_list) - 1)
+    print(f"Pre-calculating distance matrix for {len(node_list)} nodes ({total} pairs)... [{'fast' if fast_mode else 'accurate'}]")
     
-    count = 0
     start_time = time.time()
-    
-    for start_node in critical_node_ids:
-        for end_node in critical_node_ids:
+
+    if fast_mode:
+        # Batch single-source Dijkstra: one run per source covers all targets
+        # cutoff=60min limits exploration - Cairo routes are < 50 min in practice
+        CUTOFF_MINUTES = 60.0
+        for src in node_list:
+            try:
+                dist_time = nx.single_source_dijkstra_path_length(
+                    graph, src, weight='travel_time', cutoff=CUTOFF_MINUTES)
+            except Exception:
+                dist_time = {}
+            for tgt in node_list:
+                if tgt == src:
+                    continue
+                t = dist_time.get(tgt, float('inf'))
+                _MATRIX_CACHE[(src, tgt)] = t
+                # Approximate length from travel_time (assume 30 kph avg = 500 m/min)
+                _MATRIX_CACHE_LENGTH[(src, tgt)] = t * 500.0 if t < float('inf') else float('inf')
+        elapsed = time.time() - start_time
+        print(f"Pre-calculation complete (fast). Matrix entries: {len(_MATRIX_CACHE)}, "
+              f"Length entries: {len(_MATRIX_CACHE_LENGTH)}, Time: {elapsed:.1f}s")
+        return
+
+    # ---- accurate A* mode (original behaviour) ----
+    count = 0
+    for start_node in node_list:
+        for end_node in node_list:
             if start_node == end_node:
                 continue
             
@@ -473,16 +557,40 @@ def snap_address_to_edge(coords, graph):
     
     This creates a virtual node in the graph at the projected point, effectively
     forcing the routing algorithm to pass right in front of the house.
+    
+    Graph-free shortcut: if coords is present in _SNAP_OVERRIDE the pre-registered
+    (node_id, (lat, lon)) pair is returned immediately without any OSMnx call.
+    This enables benchmark / Euclidean-matrix mode where all nodes are stop indices.
     """
+    if coords in _SNAP_OVERRIDE:
+        return _SNAP_OVERRIDE[coords]
+
+    # Persistent coord snap cache — avoids repeating ox.nearest_edges across ALNS runs
+    if coords in _COORD_SNAP_CACHE:
+        return _COORD_SNAP_CACHE[coords]
+
     lat, lon = coords
     # Use a unique but consistent INT ID for the virtual node for OSMnx compatibility
     lat_key = int(abs(lat) * 1000000)
     lon_key = int(abs(lon) * 1000000)
     vnode_id = int(f"999{lat_key}{lon_key}")
     
-    # If the virtual node already exists, return it
+    # If the virtual node already exists, return it (added in a previous run)
     if vnode_id in graph:
-        return (vnode_id, (graph.nodes[vnode_id]['y'], graph.nodes[vnode_id]['x']))
+        result = (vnode_id, (graph.nodes[vnode_id]['y'], graph.nodes[vnode_id]['x']))
+        _COORD_SNAP_CACHE[coords] = result
+        return result
+
+    # Fast-snap mode: use pre-built BallTree (no GeoDataFrame conversion per call)
+    if _FAST_SNAP_MODE:
+        import numpy as np
+        tree, node_ids = _get_or_build_ball_tree(graph)
+        point_rad = np.deg2rad([[lat, lon]])
+        _, pos = tree.query(point_rad, k=1)
+        nearest_id = node_ids[pos[0][0]]
+        result = (nearest_id, (graph.nodes[nearest_id]['y'], graph.nodes[nearest_id]['x']))
+        _COORD_SNAP_CACHE[coords] = result
+        return result
 
     
     point_geom = Point(lon, lat)
@@ -572,12 +680,16 @@ def snap_address_to_edge(coords, graph):
                 graph.remove_edge(v, u, rev_k)
                 break
             
-        return (vnode_id, snapped_coords)
+        result = (vnode_id, snapped_coords)
+        _COORD_SNAP_CACHE[coords] = result
+        return result
         
     except Exception as e:
         # Fallback to nearest node if edge splitting fails
-        nearest_id = ox.nearest_nodes(graph, lon, lat)
-        return (nearest_id, (graph.nodes[nearest_id]['y'], graph.nodes[nearest_id]['x']))
+        nearest_id = fast_nearest_node(graph, lon, lat)
+        result = (nearest_id, (graph.nodes[nearest_id]['y'], graph.nodes[nearest_id]['x']))
+        _COORD_SNAP_CACHE[coords] = result
+        return result
 
 
 
@@ -592,7 +704,7 @@ def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_li
         return _safe_nodes_cache[cache_key]
     
     # Start from the nearest node
-    start_node = ox.nearest_nodes(graph, lon, lat)
+    start_node = fast_nearest_node(graph, lon, lat)
     
     safe_nodes = []
     visited = set()
@@ -993,7 +1105,7 @@ def compute_direct_time(student, school_node, graph):
         return student.direct_time_to_school
 
     lat, lon = student.coords
-    student_node = ox.nearest_nodes(graph, lon, lat)
+    student_node = fast_nearest_node(graph, lon, lat)
 
     # Check precomputed matrix first (fast, no graph search)
     cached = _MATRIX_CACHE.get((student_node, school_node), None)
@@ -1020,7 +1132,7 @@ def compute_afternoon_direct_time(student, school_node, graph):
         return student.direct_time_from_school
 
     lat, lon = student.coords
-    student_node = ox.nearest_nodes(graph, lon, lat)
+    student_node = fast_nearest_node(graph, lon, lat)
 
     cached = _MATRIX_CACHE.get((school_node, student_node), None)
     if cached is not None and cached < float('inf'):
@@ -1116,6 +1228,11 @@ def validate_permanent_student(new_stop, route, insert_position, delta_time_minu
     k            = getattr(route, 'ride_time_multiplier', 2.5)
     floor_min    = getattr(route, 'floor_minutes',        45)
     ceiling_min  = getattr(route, 'ceiling_minutes',      60)  # extra minutes over direct
+
+    # Fast-exit for unconstrained / benchmark mode: skip all ride-time checks.
+    # When multiplier >= 100 and floor >= 999, no real cap exists; avoid O(N^2) work.
+    if k >= 100 and floor_min >= 999:
+        return True, 0.0, "Unconstrained accepted"
 
     # Check 2: New student's personal ride-time cap (bidirectional fairness rule)
     # A route is only rejected for ride time if the constraint is broken in BOTH
@@ -1277,7 +1394,7 @@ def cheapest_insertion(new_student, existing_routes, graph, detour_type='tempora
         # (walking is not constrained by one-way streets)
         lat, lon = new_student.coords
         try:
-            center_node = ox.nearest_nodes(graph, lon, lat)
+            center_node = fast_nearest_node(graph, lon, lat)
             visited = set()
             bfs_queue = [(center_node, 0)]
             reachable_candidates = []

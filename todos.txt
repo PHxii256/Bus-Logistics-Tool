@@ -38,15 +38,11 @@ PAPER WRITING (in order):
 SKIP UNLESS EXTRA TIME:
   [ ] gmaps post-optimization display (Folium is sufficient)
   [ ] Real Cairo school dataset (synthetic dataset is sufficient)
-
-
-
-
-  issues:
-  1 or 2 dangerous crossing false positives(?)
-
-  no bus route rules / constraints (todo)
   
+
+  bus service quality constraints are not applying correctly in the comparison experiment
+  
+
   issues: (done)
   part of the reason why constrained is taking significantly longer
   than unconstrained is that its not a fair comparison because in our constraints

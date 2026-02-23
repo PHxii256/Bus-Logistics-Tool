@@ -20,7 +20,7 @@ Usage (from the repo root):
     python -m experiments.comparison.run_comparison --iterations 50
 """
 
-import os, sys, json, time, copy, math, argparse
+import os, sys, json, time, copy, math, argparse, datetime, statistics
 
 # ── path fix: ensure repo root is on sys.path ──
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -525,7 +525,7 @@ def _build_custom_layer_control_js(
                     map.hasLayer({vc}));"""
 
     return f"""
-    (function() {{
+    window.addEventListener('load', function() {{
         var m = {map_var};
         var CustomCtrl = L.Control.extend({{
             options: {{ position: 'topright' }},
@@ -583,7 +583,7 @@ def _build_custom_layer_control_js(
             }}
         }});
         new CustomCtrl().addTo(m);
-    }})();
+    }});
     """
 
 
@@ -642,6 +642,124 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
       </div>
     </div>
     """
+
+
+# ────────────────────────────────────────────────────────────────────
+# METRICS HELPERS
+# ────────────────────────────────────────────────────────────────────
+_WALK_SPEED_M_PER_MIN = 80.0  # comfortable pedestrian (≈ 4.8 km/h)
+
+
+def _compute_walk_stats(sol, G, stage_walk):
+    """Return walk-distance statistics for one solution.
+
+    Uses ``walk_distance_on_roads`` for road-network accuracy, falling back
+    to straight-line Haversine when the path isn't found.
+    """
+    dists = []
+    utils = []
+    for route in sol.routes:
+        for stop in route.stops:
+            if stop.stop_type == "school":
+                continue
+            for student in stop.students:
+                s_node = _eng.fast_nearest_node(G, student.coords[1], student.coords[0])
+                d = walk_distance_on_roads(G, s_node, stop.node_id)
+                if d <= 0:          # fallback: straight-line
+                    dlat = math.radians(stop.coords[0] - student.coords[0])
+                    dlon = math.radians(stop.coords[1] - student.coords[1])
+                    a = (math.sin(dlat / 2) ** 2
+                         + math.cos(math.radians(student.coords[0]))
+                         * math.cos(math.radians(stop.coords[0]))
+                         * math.sin(dlon / 2) ** 2)
+                    d = 6_371_000 * 2 * math.asin(math.sqrt(a))
+                dists.append(d)
+                # utilisation = fraction of walk budget actually used
+                stage_name = (
+                    student.school_stage.name
+                    if hasattr(student.school_stage, "name")
+                    else str(student.school_stage)
+                )
+                walk_max = stage_walk.get(stage_name, 0)
+                if walk_max > 0:
+                    utils.append(min(d / walk_max, 1.0))
+
+    if not dists:
+        return {"avg_walk_dist_m": 0, "median_walk_dist_m": 0,
+                "max_walk_dist_m": 0, "min_walk_dist_m": 0,
+                "avg_walk_time_min": 0, "avg_walk_utilisation_pct": None}
+    return {
+        "avg_walk_dist_m":        round(statistics.mean(dists),   1),
+        "median_walk_dist_m":     round(statistics.median(dists), 1),
+        "max_walk_dist_m":        round(max(dists),               1),
+        "min_walk_dist_m":        round(min(dists),               1),
+        "avg_walk_time_min":      round(statistics.mean(dists) / _WALK_SPEED_M_PER_MIN, 2),
+        "avg_walk_utilisation_pct": round(statistics.mean(utils) * 100, 1) if utils else None,
+    }
+
+
+def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
+                   sol_a, sol_b, sol_c, G_unc, iters):
+    """Assemble the full metrics dict that will be written to metrics.json."""
+    mode_map = {
+        "constrained":   ("A", sol_a),
+        "unconstrained": ("B", sol_b),
+        "door_to_door":  ("C", sol_c),
+    }
+    modes_out = {}
+    for mode_key, (mk, sol) in mode_map.items():
+        s   = all_stats[mk]
+        cx  = len(crossings_dict.get(mk, []))
+        n_routes = s["routes"]
+        # walk stats: door-to-door has walk_radius=0, so no utilisation
+        sw = stage_walk if mode_key != "door_to_door" else {k: 0 for k in stage_walk}
+        walk = _compute_walk_stats(sol, G_unc, sw)
+        modes_out[mode_key] = {
+            "routes_created":       n_routes,
+            "students_served":      s["served"],
+            "students_unserved":    s["total"] - s["served"],
+            "total_route_time_min": round(s["total_time"], 2),
+            "total_route_dist_km":  round(s["total_dist"],  2),
+            "avg_route_time_min":   round(s["total_time"] / n_routes, 2) if n_routes else 0,
+            "runtime_seconds":      round(s["runtime"],     2),
+            "unsafe_crossings":     cx,
+            "walk_stats":           walk,
+        }
+
+    # cross-mode comparisons
+    t_con  = modes_out["constrained"]["total_route_time_min"]
+    t_unc  = modes_out["unconstrained"]["total_route_time_min"]
+    t_d2d  = modes_out["door_to_door"]["total_route_time_min"]
+    cx_con = modes_out["constrained"]["unsafe_crossings"]
+    cx_unc = modes_out["unconstrained"]["unsafe_crossings"]
+
+    return {
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "config": {
+            "n_students":       meta.get("n_students"),
+            "seed":             meta.get("seed"),
+            "iterations":       iters,
+            "buses_capacity":   meta.get("buses", {}).get("capacity"),
+            "stage_walk_limits": stage_walk,
+            "stage_distribution": {
+                k: v for k, v in meta.get("stage_distribution", {}).items()
+                if k != "_comment"
+            },
+        },
+        "modes": modes_out,
+        "comparison": {
+            "efficiency_gain_vs_d2d_pct": (
+                round((t_d2d - t_con) / t_d2d * 100, 1) if t_d2d else None
+            ),
+            "safety_cost_vs_unconstrained_pct": (
+                round((t_con - t_unc) / t_unc * 100, 1) if t_unc else None
+            ),
+            "crossings_eliminated_vs_unconstrained": cx_unc - cx_con,
+            "constrained_total_time_min":   t_con,
+            "unconstrained_total_time_min": t_unc,
+            "door_to_door_total_time_min":  t_d2d,
+        },
+    }
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -823,7 +941,7 @@ def run(meta_path=None, output_path=None, iterations=None):
         fgs["A"], fgs["B"], fgs["C"],
         fg_crossings,
     )
-    m.get_root().html.add_child(folium.Element(f"<script>\n{ctrl_js}\n</script>"))
+    m.get_root().script.add_child(folium.Element(ctrl_js))
 
     m.get_root().html.add_child(folium.Element(
         _build_stats_html(all_stats, crossings_dict, occupancies_dict)))
@@ -831,6 +949,16 @@ def run(meta_path=None, output_path=None, iterations=None):
     m.save(output)
     fsize_kb = os.path.getsize(output) / 1024
     print(f"\n  Map saved: {output}  ({fsize_kb:.0f} KB)")
+
+    # ── Metrics JSON ──
+    metrics = _build_metrics(
+        meta, stage_walk, all_stats, crossings_dict,
+        sol_a, sol_b, sol_c, G_unc, iters,
+    )
+    metrics_path = os.path.splitext(output)[0] + "_metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+    print(f"  Metrics  : {metrics_path}")
 
     # ── Summary ──
     print("\n" + "=" * 60)

@@ -97,8 +97,9 @@ def main():
     dest_meta   = os.path.join(run_dir, "meta.json")
     output_path = os.path.join(run_dir, "comparison_map.html")
 
-    # copy meta into the run folder (idempotent; overwrites same content)
-    shutil.copy2(meta_path, dest_meta)
+    # copy meta into the run folder (idempotent; skip if already the same file)
+    if os.path.abspath(meta_path) != os.path.abspath(dest_meta):
+        shutil.copy2(meta_path, dest_meta)
 
     print("Experiment 3 – Safety vs Efficiency")
     print(f"  Config hash  : {h}")

@@ -32,7 +32,17 @@ from detour_engine import (
 from visualization import create_route_map
 from solution_state import ServiceSolution
 from alns_engine import ALNSEngine
-from entities import Student
+from entities import Student, School_Stage
+
+# ============================================================================
+# DEFAULT WALK LIMITS PER SCHOOL STAGE  (metres)
+# ============================================================================
+DEFAULT_STAGE_WALK_LIMITS = {
+    "KG":         0,
+    "ELEMENTARY": 0,
+    "MIDDLE":     150,
+    "HIGH":       200,
+}
 
 # ============================================================================
 # RUN HISTORY: Save each run to runs_history/{mode}_{school}_{hash8}/
@@ -75,7 +85,7 @@ def _load_road_speeds(override: dict = None) -> dict:
             'primary':       {'speed_multiplier': 0.8, 'safe_to_cross': False},
             'trunk':         {'speed_multiplier': 0.8, 'safe_to_cross': False},
             'secondary':     {'speed_multiplier': 0.6, 'safe_to_cross': False},
-            'tertiary':      {'speed_multiplier': 0.6, 'safe_to_cross': False},
+            'tertiary':      {'speed_multiplier': 0.6, 'safe_to_cross': True},
             'residential':   {'speed_multiplier': 0.3, 'safe_to_cross': True},
             'living_street': {'speed_multiplier': 0.3, 'safe_to_cross': True},
             'default':       {'speed_multiplier': 0.2, 'safe_to_cross': True},
@@ -154,7 +164,18 @@ def setup_graph(meta: dict = None, unconstrained: bool = False):
 # MATRIX PRECOMPUTATION
 # ============================================================================
 
-def precompute_matrix(students, routes, G, fast_mode=None):
+def precompute_matrix(students, routes, G, fast_mode=None, G_drive=None):
+    """Build the distance matrix for ALNS.
+
+    Parameters
+    ----------
+    G       : graph used for walking BFS (may be constrained)
+    G_drive : graph used for bus driving distances (should always be the
+              full unconstrained network).  Falls back to *G* if not given,
+              preserving backward-compatibility.
+    """
+    if G_drive is None:
+        G_drive = G
     print("[Optimization] Preparing distance matrix...")
     critical_nodes = set()
     student_frontages = {}
@@ -169,19 +190,20 @@ def precompute_matrix(students, routes, G, fast_mode=None):
     school_node = None
     for route in routes:
         for stop in route.stops:
-            if stop.node_id in G:
+            if stop.node_id in G_drive:
                 critical_nodes.add(stop.node_id)
                 if school_node is None: school_node = stop.node_id
             else:
-                nearest = _det_eng.fast_nearest_node(G, stop.coords[1], stop.coords[0])
+                nearest = _det_eng.fast_nearest_node(G_drive, stop.coords[1], stop.coords[0])
                 stop.node_id = nearest
-                stop.coords = (G.nodes[nearest]['y'], G.nodes[nearest]['x'])
+                stop.coords = (G_drive.nodes[nearest]['y'], G_drive.nodes[nearest]['x'])
                 critical_nodes.add(nearest)
                 if school_node is None: school_node = nearest
     # Auto-select fast mode for large graphs (>50K nodes) to avoid minutes-long precomputes
     if fast_mode is None:
-        fast_mode = G.number_of_nodes() > 50_000
-    precalculate_distance_matrix(G, list(critical_nodes), fast_mode=fast_mode)
+        fast_mode = G_drive.number_of_nodes() > 50_000
+    # Bus distance matrix ALWAYS uses the full driving graph
+    precalculate_distance_matrix(G_drive, list(critical_nodes), fast_mode=fast_mode)
     return critical_nodes, student_frontages
 
 # ============================================================================
@@ -223,6 +245,87 @@ def run_generate_routes(data, G, input_file_path):
     }
     save_run(data, output, report, map_files={'route_map.html': 'route_map.html'})
     return output
+
+
+# ============================================================================
+# CALLABLE API  (used by experiments/comparison/run_comparison.py)
+# ============================================================================
+
+def run_algorithm(data: dict, G, iterations: int = None,
+                  stage_walk_limits: dict = None, save=False,
+                  G_drive=None):
+    """Run ALNS on *data* using graph *G* and return (best_solution, stats_dict, school_coords).
+
+    Parameters
+    ----------
+    data : dict            – standard input dict  ({"meta": …, "data": …})
+    G    : networkx.Graph  – graph for **walking BFS** (may be constrained)
+    G_drive : networkx.Graph – graph for **bus driving** distances (should be
+                               the full unconstrained network).  Falls back to
+                               *G* when not given, preserving backward compat.
+    iterations : int       – override ALNS iterations (None = use data["meta"]["algorithm"]["iterations"])
+    stage_walk_limits : dict – override walk limits *after* students are created
+                               e.g. {"KG": 0, "MIDDLE": 150, "HIGH": 200}
+    save : bool            – persist run artefacts to runs_history/
+
+    Returns
+    -------
+    tuple : (ServiceSolution, stats_dict, school_coords_dict)
+    """
+    if G_drive is None:
+        G_drive = G
+    import time as _time
+    students, buses, routes, school_coords, constraints, algo_cfg = load_mode1_input(data, G)
+
+    # Apply stage-specific walk limits if provided
+    if stage_walk_limits:
+        _stage_map = {
+            "KG":         School_Stage.KG,
+            "ELEMENTARY": School_Stage.ELEMENTARY,
+            "MIDDLE":     School_Stage.MIDDLE,
+            "HIGH":       School_Stage.HIGH,
+        }
+        for s in students:
+            stage_name = s.school_stage.name
+            if stage_name in stage_walk_limits:
+                s.walk_radius = stage_walk_limits[stage_name]
+
+    iters = iterations or algo_cfg.get("iterations", 60)
+    # Walking BFS uses G (may be constrained); bus routing uses G_drive (unconstrained)
+    precompute_matrix(students, routes, G, G_drive=G_drive)
+
+    initial = ServiceSolution(students, routes, G_drive)
+    engine  = ALNSEngine(initial, iterations=iters)
+    t0      = _time.time()
+    best    = engine.run()
+    elapsed = _time.time() - t0
+
+    for r in best.routes:
+        from detour_engine import (
+            calculate_route_time_from_matrix,
+            calculate_route_distance_from_matrix,
+        )
+        t = calculate_route_time_from_matrix(r.stops, G_drive)
+        r.total_time = t if t is not None else 0.0
+        d = calculate_route_distance_from_matrix(r.stops, G_drive)
+        r.total_distance = d if d is not None else 0.0
+
+    served = sum(1 for s in best.students if s.is_served)
+    total  = len(best.students)
+    active = [r for r in best.routes if r.get_student_count() > 0]
+    total_time = sum(r.total_time for r in active)
+    total_dist = sum(r.total_distance for r in active)
+
+    stats = {
+        "served": served, "total": total,
+        "routes": len(active),
+        "total_time": round(total_time, 2),
+        "total_dist": round(total_dist, 2),
+        "objective": round(best.calculate_objective(), 2),
+        "runtime": round(elapsed, 2),
+    }
+
+    return best, stats, school_coords
 
 # ============================================================================
 # MODE 2: change_location

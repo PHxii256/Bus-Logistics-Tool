@@ -697,47 +697,72 @@ def snap_address_to_edge(coords, graph):
 _safe_nodes_cache = {}
 
 def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_limit):
-    """Find all nodes reachable via safe pedestrian paths within radius."""
+    """Find all nodes reachable by walking within *walk_distance_limit* metres.
+
+    Walking semantics
+    -----------------
+    The BFS is **bidirectional** (pedestrians ignore one-way rules) and only
+    traverses edges where ``is_safe_to_cross`` is True.
+
+    The ``is_safe_to_cross`` flag is set per-edge by ``setup_graph``:
+
+    * **Constrained** graph → primary / trunk / secondary are False;
+      tertiary / residential / living_street / default are True.
+    * **Unconstrained** graph → ALL edges are True.
+
+    This means:
+    * On the constrained graph the BFS can walk along residential +
+      tertiary streets but cannot cross primary / trunk / secondary.
+    * On the unconstrained graph the BFS explores freely.
+    """
     lat, lon = coords
     cache_key = (lat, lon, walk_distance_limit)
     if cache_key in _safe_nodes_cache:
         return _safe_nodes_cache[cache_key]
-    
-    # Start from the nearest node
+
     start_node = fast_nearest_node(graph, lon, lat)
-    
+
     safe_nodes = []
     visited = set()
     queue = [(start_node, 0)]  # (node, distance_so_far)
-    
+
     while queue:
         current_node, dist_so_far = queue.pop(0)
-        
+
         if current_node in visited or dist_so_far > walk_distance_limit:
             continue
         visited.add(current_node)
-        
+
         safe_nodes.append((current_node, dist_so_far))
-        
-        # Explore neighbors
+
+        # Walk along any edge marked safe (bidirectional)
         for neighbor in graph.successors(current_node):
             edge_data = graph[current_node][neighbor]
-            
-            # Use distance/travel_time as the weight for pedestrian walk
-            # (Assuming all simple roads are safe for now, filters can be added)
             is_safe = False
             edge_length = float('inf')
-            
             for key, data in edge_data.items():
                 if data.get('is_safe_to_cross', True):
                     is_safe = True
                     edge_length = min(edge_length, data.get('length', 0))
-            
             if is_safe:
                 new_dist = dist_so_far + edge_length
                 if new_dist <= walk_distance_limit:
                     queue.append((neighbor, new_dist))
-    
+
+        # Also walk against traffic (pedestrians are bidirectional)
+        for predecessor in graph.predecessors(current_node):
+            edge_data = graph[predecessor][current_node]
+            is_safe = False
+            edge_length = float('inf')
+            for key, data in edge_data.items():
+                if data.get('is_safe_to_cross', True):
+                    is_safe = True
+                    edge_length = min(edge_length, data.get('length', 0))
+            if is_safe:
+                new_dist = dist_so_far + edge_length
+                if new_dist <= walk_distance_limit:
+                    queue.append((predecessor, new_dist))
+
     _safe_nodes_cache[cache_key] = safe_nodes
     return safe_nodes
 

@@ -38,19 +38,3 @@ PAPER WRITING (in order):
 SKIP UNLESS EXTRA TIME:
   [ ] gmaps post-optimization display (Folium is sufficient)
   [ ] Real Cairo school dataset (synthetic dataset is sufficient)
-  
-
-  bus service quality constraints are not applying correctly in the comparison experiment
-  
-
-  issues: (done)
-  part of the reason why constrained is taking significantly longer
-  than unconstrained is that its not a fair comparison because in our constraints
-  is 0 walking distance for KG / elementary and maybe a significant portion of the students are premted
-  to walk very little or not at all, so it much closer to door to door. 
-  
-  to double check: highschool and middle students should be allowed to
-  cross resedential roads and walk a certain distance each.
-
-  have it be so there's a folder in the experments for this comparison where i can control the input meta
-  moreover show the bus route at the end in order with arrows and stuff and have it be toggelable

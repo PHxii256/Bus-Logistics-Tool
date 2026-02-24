@@ -3,29 +3,34 @@ experiments/experiment3_safety_vs_efficency/run.py
 ===================================================
 Thin launcher for Experiment 3 – Safety vs Efficiency.
 
-Each unique meta config produces a deterministic 8-char subfolder so runs
+Each unique input config produces a deterministic 8-char subfolder so runs
 with different parameters are never overwritten.  The comparison map *and*
-the exact meta used are saved together in the subfolder.
+the exact input used are saved together in the subfolder.
 
 Usage
 -----
-    # Run with the default meta.json in this folder
+    # Run with the default input.json in this folder
     python experiments/experiment3_safety_vs_efficency/run.py
 
-    # Run with a custom meta
-    python experiments/experiment3_safety_vs_efficency/run.py --meta path/to/meta.json
+    # Run with a custom input
+    python experiments/experiment3_safety_vs_efficency/run.py --input path/to/input.json
+    
+    or just run:
+    python experiments/experiment3_safety_vs_efficency/run.py --input experiments\experiment3_safety_vs_efficency\input.json
 
 Output structure
 ----------------
     experiments/experiment3_safety_vs_efficency/
-        meta.json               ← default / template config
+        input.json              ← default / template config
         run.py                  ← this file
-        a1b2c3d4/               ← hash of the meta config used
-            meta.json           ← copy of the config for reproducibility
+        a1b2c3d4/               ← hash of the config used
+            input.json          ← copy of the config for reproducibility
             comparison_map.html ← interactive Folium map
+            output.json         ← metrics for this run
         e5f6a7b8/               ← another run with different settings
-            meta.json
+            input.json
             comparison_map.html
+            output.json
 """
 
 import argparse
@@ -57,9 +62,9 @@ def _strip_comments(obj):
     return obj
 
 
-def _meta_hash(meta_path: str) -> str:
-    """Return an 8-char hex digest of the canonical (comment-stripped) meta."""
-    with open(meta_path, encoding="utf-8") as f:
+def _input_hash(input_path: str) -> str:
+    """Return an 8-char hex digest of the canonical (comment-stripped) input."""
+    with open(input_path, encoding="utf-8") as f:
         raw = json.load(f)
     canonical = json.dumps(
         _strip_comments(raw), sort_keys=True, separators=(",", ":")
@@ -76,42 +81,42 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--meta",
-        default=os.path.join(_DIR, "meta.json"),
+        "--input",
+        default=os.path.join(_DIR, "input.json"),
         help=(
-            "Path to a meta.json config file.  "
-            "Defaults to meta.json in this folder."
+            "Path to an input.json config file.  "
+            "Defaults to input.json in this folder."
         ),
     )
     args = parser.parse_args()
 
-    meta_path = os.path.abspath(args.meta)
-    if not os.path.isfile(meta_path):
-        sys.exit(f"[ERROR] meta file not found: {meta_path}")
+    input_path = os.path.abspath(args.input)
+    if not os.path.isfile(input_path):
+        sys.exit(f"[ERROR] config file not found: {input_path}")
 
     # ── compute hash → create run subfolder ───────────────────────────────────
-    h       = _meta_hash(meta_path)
+    h       = _input_hash(input_path)
     run_dir = os.path.join(_DIR, h)
     os.makedirs(run_dir, exist_ok=True)
 
-    dest_meta   = os.path.join(run_dir, "meta.json")
+    dest_input   = os.path.join(run_dir, "input.json")
     output_path = os.path.join(run_dir, "comparison_map.html")
 
-    # copy meta into the run folder (idempotent; skip if already the same file)
-    if os.path.abspath(meta_path) != os.path.abspath(dest_meta):
-        shutil.copy2(meta_path, dest_meta)
+    # copy input into the run folder (idempotent; skip if already the same file)
+    if os.path.abspath(input_path) != os.path.abspath(dest_input):
+        shutil.copy2(input_path, dest_input)
 
     print("Experiment 3 – Safety vs Efficiency")
     print(f"  Config hash  : {h}")
     print(f"  Run folder   : {run_dir}")
-    print(f"  Meta source  : {meta_path}")
+    print(f"  Input config : {input_path}")
     print(f"  Output map   : {output_path}")
     print()
 
     # ── delegate to the comparison engine ─────────────────────────────────────
     from run_comparison import run as _run_comparison
     _run_comparison(
-        meta_path=dest_meta,
+        input_path=dest_input,
         output_path=output_path,
     )
 

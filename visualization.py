@@ -18,12 +18,14 @@ from geopy.extra.rate_limiter import RateLimiter
 from detour_engine import (
     calculate_student_ride_time, 
     calculate_route_path_and_stats,
+    calculate_route_time_from_matrix,
     find_shortest_path_with_turns,
     walk_distance_on_roads,
     walk_path_on_roads,
     calculate_walk_penalty,
     compute_direct_time,
     compute_student_tmax,
+    _MATRIX_CACHE,
 )
 
 
@@ -36,6 +38,61 @@ def get_address_from_coords(lat, lon):
     except Exception as e:
         print(f"Geocoding error: {e}")
         return "Address lookup error"
+
+
+def _compute_pm_ride_time(route, stop, G):
+    """Afternoon (school→home) ride time for a student at `stop`.
+
+    PM route = school + reversed interior stops + school.
+    The student is dropped at their stop; ride = sum of legs from school
+    to that stop's position in the reversed sequence.
+    """
+    interior = [s for s in route.stops if s.stop_type != 'school']
+    afternoon = [route.stops[0]] + interior[::-1] + [route.stops[-1]]
+    target_idx = next((i for i, s in enumerate(afternoon) if s is stop), -1)
+    if target_idx <= 0:
+        return 0.0
+    total = 0.0
+    for i in range(target_idx):
+        u = afternoon[i].node_id
+        v = afternoon[i + 1].node_id
+        t = _MATRIX_CACHE.get((u, v), None)
+        if t is None:
+            _, t = find_shortest_path_with_turns(G, u, v)
+        if not math.isfinite(t):
+            return float('inf')
+        total += t
+    return total
+
+
+def _dir_cap_html(label, ride, direct, cap, k):
+    """Build a compact per-direction ride-cap HTML block."""
+    if direct is None or direct <= 0 or not math.isfinite(ride):
+        ride_str = f"{ride:.1f}" if math.isfinite(ride) else "∞"
+        return (
+            f'<div style="margin:3px 0; font-size:11px;">'
+            f'  <b>{label}:</b> ride&nbsp;<b>{ride_str}&nbsp;min</b> — direct N/A'
+            f'</div>'
+        )
+    ratio = ride / direct if direct > 0 else 0
+    ratio_color = 'green' if ratio <= 1.5 else ('darkorange' if ratio <= k else 'red')
+    cap_safe = cap if math.isfinite(cap) else 999
+    usage_pct = min(100, int(ride / cap_safe * 100)) if cap_safe > 0 else 0
+    over = ride > cap
+    status = '✖ over cap' if over else '✔ ok'
+    status_color = 'red' if over else 'green'
+    return (
+        f'<div style="margin:3px 0; font-size:11px;border-left:3px solid {ratio_color};padding-left:4px;">'
+        f'  <b>{label}:</b> '
+        f'  ride <b style="color:{ratio_color};">{ride:.1f}</b> / cap <b>{cap:.1f}</b> min'
+        f'  &nbsp;<span style="color:{ratio_color};">({ratio:.2f}×)</span>'
+        f'  <span style="color:{status_color}; float:right;">{status}</span><br>'
+        f'  direct {direct:.1f} min'
+        f'  <div style="background:#eee;border-radius:3px;height:5px;margin-top:2px;">'
+        f'    <div style="background:{ratio_color};width:{usage_pct}%;height:5px;border-radius:3px;"></div>'
+        f'  </div>'
+        f'</div>'
+    )
 
 
 def create_route_map(G, routes, students_to_routes=None, all_students=None, school_coords=None, output_file='route_map.html'):
@@ -239,73 +296,57 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             print(f"Geocoding address for student {student_obj.id}...")
             address_name = get_address_from_coords(student_obj.coords[0], student_obj.coords[1])
             
-            # Calculate Individual Ride Time (from assigned stop to school along route)
-            ride_time = 0
+            # Calculate AM ride time (home-stop → school) via matrix-cache sum
+            ride_time_am = 0.0
             stop_idx = -1
             for i, s in enumerate(route.stops):
                 if s == stop:
                     stop_idx = i
                     break
-            
             if stop_idx != -1:
-                # Use turn-aware calculation for student's individual ride
-                remaining_stops = route.stops[stop_idx:]
-                _, ride_time = calculate_route_path_and_stats(G, remaining_stops, weight='travel_time')
-            
-            # Calculate Direct Ride Time (from student home node to school)
-            direct_time = "N/A"
-            direct_time_mins = None
+                ride_time_am = calculate_route_time_from_matrix(route.stops[stop_idx:], G)
+                if ride_time_am >= 9999:
+                    ride_time_am = float('inf')
+
+            # Calculate PM ride time (school → home-stop, reversed route)
+            ride_time_pm = _compute_pm_ride_time(route, stop, G)
+
+            # Direct times: AM = home→school, PM = school→home (may differ on one-way roads)
+            student_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
+            school_node  = route.stops[-1].node_id
+
+            direct_am = None  # home → school
+            direct_pm = None  # school → home
             try:
-                student_node = ox.nearest_nodes(G, student_obj.coords[1], student_obj.coords[0])
-                school_node = route.stops[-1].node_id
-                # Use turn-aware search for direct potential too
-                _, direct_time_mins = find_shortest_path_with_turns(G, student_node, school_node, weight='travel_time')
-                direct_time = f"{direct_time_mins:.1f} min"
-            except:
+                _, direct_am = find_shortest_path_with_turns(G, student_node, school_node, weight='travel_time')
+                if not math.isfinite(direct_am):
+                    direct_am = None
+            except Exception:
+                pass
+            try:
+                _, direct_pm = find_shortest_path_with_turns(G, school_node, student_node, weight='travel_time')
+                if not math.isfinite(direct_pm):
+                    direct_pm = None
+            except Exception:
                 pass
 
-            # Per-student ride-time cap and ratio (tiered: clamp(k*T_direct, floor, ceiling))
-            ride_cap_html = ""
-            if direct_time_mins is not None and direct_time_mins > 0:
-                k           = getattr(route, 'ride_time_multiplier', 2.5)
-                floor_min   = getattr(route, 'floor_minutes',        45)
-                ceiling_min = getattr(route, 'ceiling_minutes',      30)  # extra over direct
-                raw_cap          = k * direct_time_mins
-                absolute_ceiling = direct_time_mins + ceiling_min
-                student_tmax     = max(floor_min, min(raw_cap, absolute_ceiling))
+            # Per-student caps (use each direction's own direct time)
+            k           = getattr(route, 'ride_time_multiplier', 2.5)
+            floor_min   = getattr(route, 'floor_minutes',        45)
+            ceiling_min = getattr(route, 'ceiling_minutes',      60)
 
-                # Which tier is active?
-                if raw_cap <= floor_min:
-                    tier_label = f'floor ({floor_min} min)'
-                    tier_color = '#888'
-                elif raw_cap >= absolute_ceiling:
-                    tier_label = f'direct+{ceiling_min} min ({absolute_ceiling:.0f} min)'
-                    tier_color = '#c0392b'
-                else:
-                    tier_label = f'{k}× direct'
-                    tier_color = '#2980b9'
+            def _cap(d):
+                if d is None or d <= 0:
+                    return float('inf')
+                return max(floor_min, min(k * d, d + ceiling_min))
 
-                ratio = ride_time / direct_time_mins
-                if ratio <= 1.5:
-                    ratio_color = 'green'
-                elif ratio <= k:
-                    ratio_color = 'darkorange'
-                else:
-                    ratio_color = 'red'
+            cap_am = _cap(direct_am)
+            cap_pm = _cap(direct_pm)
 
-                usage_pct = min(100, int(ride_time / student_tmax * 100)) if student_tmax > 0 else 0
-                ride_cap_html = (
-                    f'<div style="margin-top:4px; font-size:11px;">'
-                    f'  <b>Ride Cap:</b> '
-                    f'  <b style="color:{ratio_color};">{ride_time:.1f}</b> / '
-                    f'  <b>{student_tmax:.1f} min</b>'
-                    f'  &nbsp;<span style="color:{ratio_color};">({ratio:.2f}× direct)</span><br>'
-                    f'  <span style="color:{tier_color};">Active tier: {tier_label}</span>'
-                    f'  <div style="background:#eee;border-radius:3px;height:6px;margin-top:2px;">'
-                    f'    <div style="background:{ratio_color};width:{usage_pct}%;height:6px;border-radius:3px;"></div>'
-                    f'  </div>'
-                    f'</div>'
-                )
+            ride_cap_html = (
+                _dir_cap_html('🟠 AM home→school', ride_time_am, direct_am, cap_am, k) +
+                _dir_cap_html('🟦 PM school→home', ride_time_pm, direct_pm, cap_pm, k)
+            )
 
             # Calculate walking distance along roads (undirected - ignores one-way)
             # Pedestrians walk on sidewalks/roads without U-turn or direction rules
@@ -350,21 +391,20 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
             folium.Marker(
                 location=student_obj.coords,
                 popup=folium.Popup(f"""
-                <div style="width: 220px;">
+                <div style="width: 280px; font-size:12px;">
                     <b>Student: {student_obj.id}</b>{assignment_label}<br>
                     Stage: {student_obj.school_stage.name}<br>
                     Home: {student_obj.coords[0]:.6f}, {student_obj.coords[1]:.6f}<br>
                     Address: {address_name}<br>
                     <div style="margin-top:5px; border-top:1px solid #ccc; padding-top:5px;">
-                        <b>Routing Details:</b><br>
-                        Assigned Route: [ {route.route_id} ]<br>
-                        Actual Ride Time: {ride_time:.1f} min<br>
-                        Direct Potential: {direct_time}<br>
+                        <b>Assigned Route:</b> [ {route.route_id} ]<br>
                         {ride_cap_html}
-                        Walk to Stop: {walk_info} {walk_warning_html}
+                        <div style="margin-top:4px; font-size:11px;">
+                            Walk to Stop: {walk_info} {walk_warning_html}
+                        </div>
                     </div>
                 </div>
-                """, max_width=450),
+                """, max_width=500),
                 tooltip=f"{'[TEMP] ' if is_temporary else ''}Home: {student_obj.id} ({student_obj.coords[0]:.5f}, {student_obj.coords[1]:.5f})",
                 icon=home_icon
             ).add_to(m)
@@ -437,10 +477,9 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                 print(f"Geocoding address for unassigned student {student.id}...")
                 address_name = get_address_from_coords(student.coords[0], student.coords[1])
                 failure_msg = getattr(student, 'failure_reason', 'No valid insertion found')
-                
-                folium.CircleMarker(
+
+                folium.Marker(
                     location=student.coords,
-                    radius=7,
                     popup=folium.Popup(f"""
                     <div style="width: 300px;">
                         <b style="color:red;">UNASSIGNED: {student.id}</b><br>
@@ -453,11 +492,7 @@ def create_route_map(G, routes, students_to_routes=None, all_students=None, scho
                     </div>
                     """, max_width=400),
                     tooltip=f"UNASSIGNED: {student.id}",
-                    color='black',
-                    fill=True,
-                    fillColor='black',
-                    fillOpacity=0.6,
-                    weight=3
+                    icon=folium.Icon(color='red', icon='times', prefix='fa')
                 ).add_to(m)
 
     # Calculate total served students and total pool

@@ -118,7 +118,8 @@ class Route:
     used during the day.
     """
     def __init__(self, bus, route_id=None, route_tmax=60,
-                 ride_time_multiplier=2.5, floor_minutes=45, ceiling_minutes=30):
+                 ride_time_multiplier=2.5, floor_minutes=45, ceiling_minutes=30,
+                 bidirectional_check=True):
         """Initialize a Route.
         
         Args:
@@ -129,6 +130,9 @@ class Route:
             floor_minutes: Minimum cap — ensures nearby students don't over-penalise fleet (default 45)
             ceiling_minutes: Max EXTRA minutes allowed beyond direct route time (default 30)
                              Absolute cap = T_direct + ceiling_minutes
+            bidirectional_check: If True, a student is only rejected for ride-time when BOTH
+                                 the morning (home→school) AND afternoon (school→home) rides
+                                 exceed their cap.  If False, only the morning ride is checked.
         """
         self.bus = bus
         self.stops = [] # List of Stop objects in order
@@ -140,6 +144,7 @@ class Route:
         self.ride_time_multiplier = ride_time_multiplier
         self.floor_minutes        = floor_minutes
         self.ceiling_minutes      = ceiling_minutes
+        self.bidirectional_check  = bidirectional_check
         self.detour_time_used = 0  # Track temporary detour time used today
         
     def get_revenue(self):

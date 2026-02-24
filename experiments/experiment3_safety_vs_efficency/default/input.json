@@ -1,5 +1,5 @@
 {
-  "_comment": "Controllable comparison experiment config. Edit this to change what gets compared.",
+  "_comment": "Controllable comparison experiment config (input). Edit this to change what gets compared.",
 
   "school": {
     "name": "Victory College School",
@@ -32,6 +32,8 @@
   },
 
   "constraints": {
+    "enabled": false,
+    "_comment_enabled": "Set to false to disable all ride-time caps (effectively uncaps routes for raw comparison).",
     "ride_time_multiplier": 2.5,
     "floor_minutes": 45,
     "ceiling_minutes": 60,

@@ -107,7 +107,7 @@ def _apply_unconstrained(data):
     if 'data' in d and 'students' in d['data']:
         for s in d['data']['students']:
             s['walk_radius_override'] = 400
-    d['meta'].setdefault('constraints', {}).update({
+    d['input'].setdefault('constraints', {}).update({
         "ride_time_multiplier": 999, "floor_minutes": 999, "ceiling_minutes": 999})
     return d
 
@@ -186,8 +186,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"Loading graph from '{args.input}'...")
-    meta = load_json(args.input)['meta']
-    G = setup_graph(meta, unconstrained=False)
+    input = load_json(args.input)['input']
+    G = setup_graph(input, unconstrained=False)
     _prebuild_ball_tree(G)   # Build BallTree once; all snaps use cached tree (<1ms each)
 
     if args.exp in ('1', 'all'):

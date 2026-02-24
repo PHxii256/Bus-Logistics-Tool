@@ -42,20 +42,26 @@ from data_loader   import load_mode1_input
 from solution_state import ServiceSolution
 from detour_engine  import (
     calculate_route_path_and_stats,
+    calculate_route_time_from_matrix,
     walk_path_on_roads,
     walk_distance_on_roads,
+    find_shortest_path_with_turns,
+    compute_student_tmax,
+    compute_direct_time,
+    calculate_walk_penalty,
+    _MATRIX_CACHE,
 )
 
 # Patch: fast snap for large graphs
 _eng._FAST_SNAP_MODE = True
 
 # ────────────────────────────────────────────────────────────────────
-# Load meta.json
+# Load input.json
 # ────────────────────────────────────────────────────────────────────
-_META_PATH = os.path.join(_SCRIPT_DIR, "meta.json")
+_INPUT_PATH = os.path.join(_SCRIPT_DIR, "input.json")
 
 def _load_meta(path=None):
-    with open(path or _META_PATH) as f:
+    with open(path or _INPUT_PATH) as f:
         return json.load(f)
 
 
@@ -113,25 +119,24 @@ def _relax_ride_constraints(d):
 
 
 def _make_constrained(data):
-    """Mode A: keep safety flags, relax ride-time caps for fairness."""
-    d = copy.deepcopy(data)
-    return _relax_ride_constraints(d)
+    """Mode A: safety constraints ON, ride-time constraints from meta.json."""
+    return copy.deepcopy(data)
 
 
 def _make_unconstrained(data):
-    """Mode B: all-safe walking, relax ride-time caps."""
+    """Mode B: all-safe walking, ride-time constraints from meta.json."""
     d = copy.deepcopy(data)
     for s in d["data"]["students"]:
         s["walk_radius_override"] = 400
-    return _relax_ride_constraints(d)
+    return d
 
 
 def _make_door_to_door(data):
-    """Mode C: no walking, relax ride-time caps."""
+    """Mode C: no walking (walk_radius=0), ride-time constraints from meta.json."""
     d = copy.deepcopy(data)
     for s in d["data"]["students"]:
         s["walk_radius_override"] = 0
-    return _relax_ride_constraints(d)
+    return d
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -297,6 +302,12 @@ _ROUTE_COLORS = {
     "B": ["#4CAF50", "#2E7D32", "#1B5E20", "#A5D6A7"],
     "C": ["#FF9800", "#E65100", "#BF360C", "#FFCC80"],
 }
+# Matching folium-valid named colors for Icon markers (same order as _ROUTE_COLORS)
+_ICON_COLORS = {
+    "A": ["blue",   "darkblue",  "darkblue",  "lightblue"],
+    "B": ["green",  "darkgreen", "darkgreen", "lightgreen"],
+    "C": ["orange", "red",       "darkred",   "beige"],
+}
 _MODE_NAMES = {
     "A": "Constrained (Safe Walking)",
     "B": "Unconstrained (Any Walking)",
@@ -404,17 +415,74 @@ def _build_walk_coords(G, wp):
     return wcoords
 
 
-def _add_route_layer(m, G, sol, mode_key, G_con):
+def _compute_pm_ride_time(route, stop, G):
+    """Afternoon (school→home-stop) ride time using the reversed route sequence."""
+    interior = [s for s in route.stops if s.stop_type != 'school']
+    afternoon = [route.stops[0]] + interior[::-1] + [route.stops[-1]]
+    target_idx = next((i for i, s in enumerate(afternoon) if s is stop), -1)
+    if target_idx <= 0:
+        return 0.0
+    total = 0.0
+    for i in range(target_idx):
+        u = afternoon[i].node_id
+        v = afternoon[i + 1].node_id
+        t = _MATRIX_CACHE.get((u, v), None)
+        if t is None:
+            _, t = find_shortest_path_with_turns(G, u, v)
+        if not math.isfinite(t):
+            return float('inf')
+        total += t
+    return total
+
+
+def _dir_cap_html(label, ride, direct, cap, k):
+    """Compact per-direction ride-cap block with progress bar."""
+    if direct is None or direct <= 0 or not math.isfinite(ride):
+        ride_str = f"{ride:.1f}" if math.isfinite(ride) else "∞"
+        return (
+            f'<div style="margin:3px 0;font-size:11px;">'
+            f'  <b>{label}:</b> ride&nbsp;<b>{ride_str}&nbsp;min</b> — direct N/A'
+            f'</div>'
+        )
+    ratio = ride / direct
+    ratio_color = 'green' if ratio <= 1.5 else ('darkorange' if ratio <= k else 'red')
+    cap_safe = cap if math.isfinite(cap) else 999
+    usage_pct = min(100, int(ride / cap_safe * 100)) if cap_safe > 0 else 0
+    status = '✖ over cap' if ride > cap else '✔ ok'
+    status_color = 'red' if ride > cap else 'green'
+    return (
+        f'<div style="margin:3px 0;font-size:11px;border-left:3px solid {ratio_color};padding-left:4px;">'
+        f'  <b>{label}:</b> '
+        f'  ride <b style="color:{ratio_color};">{ride:.1f}</b> / cap <b>{cap:.1f}</b> min'
+        f'  &nbsp;<span style="color:{ratio_color};">({ratio:.2f}×)</span>'
+        f'  <span style="color:{status_color};float:right;">{status}</span><br>'
+        f'  direct {direct:.1f} min'
+        f'  <div style="background:#eee;border-radius:3px;height:5px;margin-top:2px;">'
+        f'    <div style="background:{ratio_color};width:{usage_pct}%;height:5px;border-radius:3px;"></div>'
+        f'  </div>'
+        f'</div>'
+    )
+
+
+def _add_route_layer(m, G, sol, mode_key, G_con, constraints=None):
     """Add route + walk FeatureGroups for one mode.  Returns (fg_routes, fg_walks, crossings, occupancies)."""
+    con = constraints or {}
+    ride_k       = float(con.get("ride_time_multiplier", 2.5))
+    floor_min    = float(con.get("floor_minutes",        45))
+    ceiling_min  = float(con.get("ceiling_minutes",      60))
+    caps_enabled = bool(con.get("enabled",              True))
+
     show = mode_key in ("A", "B")   # show constrained + unconstrained by default
     fg_routes = FeatureGroup(name=f"{_MODE_NAMES[mode_key]} – Routes",        show=show)
     fg_walks  = FeatureGroup(name=f"{_MODE_NAMES[mode_key]} – Walking Paths", show=show)
-    colors = _ROUTE_COLORS[mode_key]
+    colors      = _ROUTE_COLORS[mode_key]
+    icon_colors = _ICON_COLORS[mode_key]
     active  = [r for r in sol.routes if r.get_student_count() > 0]
     occupancies = []
 
     for ri, route in enumerate(active):
-        c = colors[ri % len(colors)]
+        c  = colors[ri % len(colors)]
+        ic = icon_colors[ri % len(icon_colors)]
 
         # ── Bus route polyline with arrow-heads ──
         if len(route.stops) > 1:
@@ -452,7 +520,7 @@ def _add_route_layer(m, G, sol, mode_key, G_con):
                 tooltip=f"{mode_key}-{route.route_id} Stop {si} ({n_stu} students)",
             ).add_to(fg_routes)
 
-            # ── Walk paths + student homes ──
+            # ── Walk paths + student home markers ──
             for student in stop.students:
                 s_node = _eng.fast_nearest_node(G, student.coords[1], student.coords[0])
                 wp = walk_path_on_roads(G, s_node, stop.node_id)
@@ -465,10 +533,78 @@ def _add_route_layer(m, G, sol, mode_key, G_con):
                     ).add_to(fg_walks)
 
                 walk_m = walk_distance_on_roads(G, s_node, stop.node_id)
-                folium.CircleMarker(
-                    location=student.coords, radius=4,
-                    color=c, fill=True, fillColor="white", fillOpacity=0.9, weight=2,
-                    tooltip=f"{student.id} ({student.school_stage.name}) — walk {walk_m:.0f} m",
+
+                # ── AM ride time: this stop → school (matrix-cache safe) ──
+                stop_idx = next((i for i, s in enumerate(route.stops) if s is stop), -1)
+                ride_time_am = 0.0
+                if stop_idx != -1:
+                    ride_time_am = calculate_route_time_from_matrix(route.stops[stop_idx:], G)
+                    if ride_time_am >= 9999:
+                        ride_time_am = float('inf')
+
+                # ── PM ride time: school → this stop (reversed route) ──
+                ride_time_pm = _compute_pm_ride_time(route, stop, G)
+
+                # ── Direct times: AM = home→school, PM = school→home ──
+                school_node = route.stops[-1].node_id
+                direct_am = None
+                direct_pm = None
+                try:
+                    _, direct_am = find_shortest_path_with_turns(G, s_node, school_node, weight='travel_time')
+                    if not math.isfinite(direct_am):
+                        direct_am = None
+                except Exception:
+                    pass
+                try:
+                    _, direct_pm = find_shortest_path_with_turns(G, school_node, s_node, weight='travel_time')
+                    if not math.isfinite(direct_pm):
+                        direct_pm = None
+                except Exception:
+                    pass
+
+                # ── Per-direction caps ──
+                k_eff = getattr(route, 'ride_time_multiplier', ride_k)
+                fl    = getattr(route, 'floor_minutes',        floor_min)
+                ce    = getattr(route, 'ceiling_minutes',      ceiling_min)
+
+                def _cap(d):
+                    if d is None or d <= 0:
+                        return float('inf')
+                    return max(fl, min(k_eff * d, d + ce))
+
+                cap_html = (
+                    _dir_cap_html('🟠 AM home→school', ride_time_am, direct_am, _cap(direct_am), k_eff) +
+                    _dir_cap_html('🟦 PM school→home', ride_time_pm, direct_pm, _cap(direct_pm), k_eff)
+                ) if caps_enabled else ''
+
+                # ── Walk info ──
+                stage_name = (
+                    student.school_stage.name
+                    if hasattr(student.school_stage, "name")
+                    else str(student.school_stage)
+                )
+                walk_limit = student.walk_radius if hasattr(student, 'walk_radius') else 0
+                walk_info  = (f"{walk_m:.0f}m / {walk_limit:.0f}m" if walk_limit > 0
+                              else f"{walk_m:.0f}m (Door-to-Door)")
+
+                popup_html = (
+                    f'<div style="width:260px;font-size:12px;">'
+                    f'<b>Student: {student.id}</b><br>'
+                    f'Stage: {stage_name}<br>'
+                    f'Home: {student.coords[0]:.5f}, {student.coords[1]:.5f}<br>'
+                    f'Mode: {_MODE_NAMES[mode_key]}<br>'
+                    f'<div style="margin-top:5px;border-top:1px solid #ccc;padding-top:5px;">'
+                    f'<b>Route:</b> {route.route_id}<br>'
+                    f'{cap_html}'
+                    f'<div style="margin-top:3px;font-size:11px;">Walk to Stop: {walk_info}</div>'
+                    f'</div></div>'
+                )
+
+                folium.Marker(
+                    location=student.coords,
+                    tooltip=f"{student.id} ({stage_name}) — AM {ride_time_am:.0f} min, walk {walk_m:.0f}m",
+                    popup=folium.Popup(popup_html, max_width=300),
+                    icon=folium.Icon(color=ic, icon='home', prefix='fa'),
                 ).add_to(fg_walks)
 
         occupancies.append(student_count)
@@ -477,6 +613,112 @@ def _add_route_layer(m, G, sol, mode_key, G_con):
     fg_routes.add_to(m)
     fg_walks.add_to(m)
     return fg_routes, fg_walks, crossings, occupancies
+
+
+def _count_satisfied(sol, G, constraints):
+    """Count served students whose ride time is within the cap.
+
+    Respects ``bidirectional_check``:
+      True  → satisfied when AM **or** PM ride ≤ cap (lenient: both must fail to fail)
+      False → satisfied when AM ride ≤ cap (strict)
+
+    Students without a finite direct time are counted as satisfied (no basis to reject).
+    """
+    con      = constraints or {}
+    k        = float(con.get('ride_time_multiplier', 2.5))
+    fl       = float(con.get('floor_minutes',        45))
+    ce       = float(con.get('ceiling_minutes',      60))
+    bidir    = bool(con.get('bidirectional_check',   True))
+    caps_on  = bool(con.get('enabled',               True))
+
+    if not caps_on:
+        # caps disabled — every served student is trivially satisfied
+        return sum(1 for s in sol.students if getattr(s, 'is_served', False))
+
+    def _cap(d):
+        if d is None or d <= 0 or not math.isfinite(d):
+            return float('inf')
+        return max(fl, min(k * d, d + ce))
+
+    satisfied = 0
+    for route in sol.routes:
+        school_node = route.stops[-1].node_id
+        for stop in route.stops:
+            if stop.stop_type == 'school':
+                continue
+            stop_idx = next((i for i, s in enumerate(route.stops) if s is stop), -1)
+            if stop_idx == -1:
+                continue
+
+            # AM ride: boarding stop → school
+            ride_am = calculate_route_time_from_matrix(route.stops[stop_idx:], G)
+            if ride_am >= 9999:
+                ride_am = float('inf')
+
+            for student in stop.students:
+                s_node = _eng.fast_nearest_node(G, student.coords[1], student.coords[0])
+                try:
+                    _, direct_am = find_shortest_path_with_turns(
+                        G, s_node, school_node, weight='travel_time')
+                    if not math.isfinite(direct_am):
+                        direct_am = None
+                except Exception:
+                    direct_am = None
+
+                cap_am = _cap(direct_am)
+                am_ok  = ride_am <= cap_am
+
+                if not bidir:
+                    if am_ok:
+                        satisfied += 1
+                else:
+                    if am_ok:
+                        satisfied += 1
+                    else:
+                        # Check PM direction
+                        ride_pm = _compute_pm_ride_time(route, stop, G)
+                        try:
+                            _, direct_pm = find_shortest_path_with_turns(
+                                G, school_node, s_node, weight='travel_time')
+                            if not math.isfinite(direct_pm):
+                                direct_pm = None
+                        except Exception:
+                            direct_pm = None
+                        cap_pm = _cap(direct_pm)
+                        if ride_pm <= cap_pm:
+                            satisfied += 1
+    return satisfied
+
+
+def _add_unserved_layer(m, sol, mode_key):
+    """Add a FeatureGroup with X-pin markers for every unserved student in *sol*."""
+    show = mode_key in ("A", "B")
+    fg = FeatureGroup(name=f"{_MODE_NAMES[mode_key]} – Unserved Students", show=show)
+    for student in sol.students:
+        if getattr(student, 'is_served', False):
+            continue
+        stage_name = (
+            student.school_stage.name
+            if hasattr(student.school_stage, 'name')
+            else str(student.school_stage)
+        )
+        popup_html = (
+            f'<div style="width:220px;font-size:12px;">'
+            f'<b style="color:#c0392b;">&#x2716; Unserved</b><br>'
+            f'<b>Student: {student.id}</b><br>'
+            f'Stage: {stage_name}<br>'
+            f'Home: {student.coords[0]:.5f}, {student.coords[1]:.5f}<br>'
+            f'Mode: {_MODE_NAMES[mode_key]}'
+            f'</div>'
+        )
+        folium.Marker(
+            location=student.coords,
+            tooltip=f"{student.id} ({stage_name}) — UNSERVED",
+            popup=folium.Popup(popup_html, max_width=260),
+            icon=folium.Icon(color='red', icon='times', prefix='fa'),
+        ).add_to(fg)
+    fg.add_to(m)
+    return fg
 
 
 def _add_crossing_markers(m, crossings_dict):
@@ -504,6 +746,7 @@ def _build_custom_layer_control_js(
     map_var, fg_danger, fg_unclass,
     fgs_a, fgs_b, fgs_c,
     fg_crossings,
+    fg_unserved_a=None, fg_unserved_b=None, fg_unserved_c=None,
 ):
     """Return JS that adds a titled, grouped layer-control widget to the map.
 
@@ -523,6 +766,19 @@ def _build_custom_layer_control_js(
                 row('Unsafe Crossings',
                     [{vc}],
                     map.hasLayer({vc}));"""
+
+    unserved_rows = ""
+    for fg_u, label in [
+        (fg_unserved_a, 'Constrained – Unserved'),
+        (fg_unserved_b, 'Unconstrained – Unserved'),
+        (fg_unserved_c, 'Door-to-Door – Unserved'),
+    ]:
+        if fg_u is not None:
+            vu = fg_u.get_name()
+            unserved_rows += f"""
+                row('{label}',
+                    [{vu}],
+                    map.hasLayer({vu}));"""
 
     return f"""
     window.addEventListener('load', function() {{
@@ -578,7 +834,7 @@ def _build_custom_layer_control_js(
                 row('Dangerous Roads (unsafe to cross)',
                     [{v_danger}], map.hasLayer({v_danger}));
                 row('Unclassified Roads (no student placement)',
-                    [{v_unclass}], map.hasLayer({v_unclass}));{crossings_row}
+                    [{v_unclass}], map.hasLayer({v_unclass}));{crossings_row}{unserved_rows}
                 return c;
             }}
         }});
@@ -610,6 +866,7 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
               <td style="text-align:left; padding:1px 4px;">Distance</td>
               <td style="text-align:left; padding:1px 4px;">Avg Occ.</td>
               <td style="text-align:left; padding:1px 4px;">Served</td>
+              <td style="text-align:left; padding:1px 4px;">Satisfied</td>
               <td style="text-align:left; padding:1px 4px;">Crossings</td>
             </tr>
             <tr style="font-weight:bold;">
@@ -618,13 +875,14 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
               <td style="padding:1px 4px;">{s['total_dist']:.1f} km</td>
               <td style="padding:1px 4px;">{avg_occ:.1f}</td>
               <td style="padding:1px 4px;">{s['served']}/{s['total']}</td>
+              <td style="padding:1px 4px;">{s.get('satisfied', '—')}/{s['served']}</td>
               <td style="padding:1px 4px; color:{cx_color};">{cx}</td>
             </tr>
           </table>
         </div>"""
 
     return f"""
-    <div style="position:fixed; bottom:15px; right:15px; width:380px;
+    <div style="position:fixed; bottom:15px; right:15px; width:430px;
                 max-height:calc(100vh - 80px); overflow-y:auto;
                 background:white; border:2px solid #555; z-index:9999;
                 padding:12px 14px; border-radius:6px; font-size:12px;
@@ -714,6 +972,52 @@ def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
         # walk stats: door-to-door has walk_radius=0, so no utilisation
         sw = stage_walk if mode_key != "door_to_door" else {k: 0 for k in stage_walk}
         walk = _compute_walk_stats(sol, G_unc, sw)
+        
+        # Build student list with ride time, direct potential, walk distance
+        students_list = []
+        for route in sol.routes:
+            # Pre-compute per-stop ride-time using matrix-cache summation
+            # (safe against cleared caches; falls back to lazy A* on miss)
+            school_node = route.stops[-1].node_id
+            for stop in route.stops:
+                if stop.stop_type == "school":
+                    continue
+
+                stop_idx = next((i for i, s in enumerate(route.stops) if s is stop), -1)
+                if stop_idx == -1:
+                    continue
+
+                # Ride time = sum of legs from this stop to school (matrix-safe)
+                ride_time = calculate_route_time_from_matrix(route.stops[stop_idx:], G_unc)
+                if ride_time >= 9999:
+                    ride_time = None  # truly unreachable; treat as unknown
+
+                for student in stop.students:
+                    stage_name = (
+                        student.school_stage.name
+                        if hasattr(student.school_stage, "name")
+                        else str(student.school_stage)
+                    )
+
+                    # Direct time home -> school (cached on student after first call)
+                    direct_time = compute_direct_time(student, school_node, G_unc)
+                    if not math.isfinite(direct_time):
+                        direct_time = None
+
+                    # Walk distance home -> assigned stop
+                    s_node = _eng.fast_nearest_node(G_unc, student.coords[1], student.coords[0])
+                    walk_dist = walk_distance_on_roads(G_unc, s_node, stop.node_id)
+                    if walk_dist <= 0 or not math.isfinite(walk_dist):
+                        walk_dist = 0.0
+
+                    students_list.append({
+                        "id": student.id,
+                        "stage": stage_name,
+                        "ride_time_min": round(ride_time, 2) if ride_time is not None else None,
+                        "direct_potential_min": round(direct_time, 2) if direct_time is not None else None,
+                        "walk_distance_m": round(walk_dist, 1),
+                    })
+        
         modes_out[mode_key] = {
             "routes_created":       n_routes,
             "students_served":      s["served"],
@@ -724,6 +1028,7 @@ def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
             "runtime_seconds":      round(s["runtime"],     2),
             "unsafe_crossings":     cx,
             "walk_stats":           walk,
+            "students":             students_list,
         }
 
     # cross-mode comparisons
@@ -762,24 +1067,35 @@ def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
     }
 
 
+def _sanitise_floats(obj):
+    """Recursively replace non-finite floats with None so json.dump stays valid."""
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitise_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitise_floats(v) for v in obj]
+    return obj
+
+
 # ────────────────────────────────────────────────────────────────────
 # PUBLIC API  (callable from thin launchers)
 # ────────────────────────────────────────────────────────────────────
-def run(meta_path=None, output_path=None, iterations=None):
+def run(input_path=None, output_path=None, iterations=None):
     """Run the three-mode comparison and save the map.
 
     Parameters
     ----------
-    meta_path  : str | None
-        Path to a meta.json file.  Defaults to the bundled meta.json
+    input_path  : str | None
+        Path to an input.json file.  Defaults to the bundled input.json
         sitting next to this script.
     output_path : str | None
         Absolute path for the output HTML map.  Defaults to
-        ``comparison_map.html`` next to the meta file.
+        ``comparison_map.html`` next to the input file.
     iterations : int | None
-        Override ALNS iteration count from meta.json.
+        Override ALNS iteration count from input.json.
     """
-    meta = _load_meta(meta_path)
+    meta = _load_meta(input_path)
     iters  = iterations or meta.get("algorithm", {}).get("iterations", 30)
 
     # Resolve where to write the map
@@ -787,7 +1103,7 @@ def run(meta_path=None, output_path=None, iterations=None):
         output = output_path
     else:
         rel = meta.get("output", "comparison_map.html")
-        base = os.path.dirname(meta_path) if meta_path else _SCRIPT_DIR
+        base = os.path.dirname(input_path) if input_path else _SCRIPT_DIR
         output = rel if os.path.isabs(rel) else os.path.join(base, rel)
 
     school_cfg = meta["school"]
@@ -797,7 +1113,7 @@ def run(meta_path=None, output_path=None, iterations=None):
                   if k in ("KG", "ELEMENTARY", "MIDDLE", "HIGH")}
 
     print("=" * 60)
-    print("  THREE-MODE ROUTING COMPARISON  (meta.json)")
+    print("  THREE-MODE ROUTING COMPARISON  (input.json)")
     print("=" * 60)
     print(f"  Students : {meta['n_students']}")
     print(f"  Seed     : {meta['seed']}")
@@ -836,11 +1152,13 @@ def run(meta_path=None, output_path=None, iterations=None):
     # ── 4. Mode A: Constrained ──
     # Walking BFS uses G_con (safety-restricted edges).
     # Bus driving distances ALWAYS use G_unc (full road network).
-    # Ride-time caps are relaxed so only the walking safety variable differs.
+    _ride_caps_on = meta.get("constraints", {}).get("enabled", True)
     print("\n" + "-" * 50)
     print("MODE A: Constrained (safety ON, stage walk radii)")
     print("-" * 50)
     data_a = _make_constrained(base_data)
+    if not _ride_caps_on:
+        _relax_ride_constraints(data_a)
     _reset_caches()
     _prebuild_ball_tree(G_con)
     sol_a, stats_a, school_a = run_algorithm(
@@ -856,6 +1174,8 @@ def run(meta_path=None, output_path=None, iterations=None):
     print("MODE B: Unconstrained (all safe, same walk radius)")
     print("-" * 50)
     data_b = _make_unconstrained(base_data)
+    if not _ride_caps_on:
+        _relax_ride_constraints(data_b)
     _reset_caches()
     _prebuild_ball_tree(G_unc)
     sol_b, stats_b, school_b = run_algorithm(data_b, G_unc, iterations=iters,
@@ -870,6 +1190,8 @@ def run(meta_path=None, output_path=None, iterations=None):
     print("MODE C: Door-to-Door (walk=0, bus visits every home)")
     print("-" * 50)
     data_c = _make_door_to_door(base_data)
+    if not _ride_caps_on:
+        _relax_ride_constraints(data_c)
     _reset_caches()
     _prebuild_ball_tree(G_unc)
     sol_c, stats_c, school_c = run_algorithm(data_c, G_unc, iterations=iters,
@@ -919,18 +1241,22 @@ def run(meta_path=None, output_path=None, iterations=None):
     _eng._MATRIX_CACHE_LENGTH.clear()
 
     # Bus routes are always rendered with G_unc (the bus drives on all roads)
-    fgs = {}   # mk -> (fg_routes, fg_walks)
+    fgs = {}          # mk -> (fg_routes, fg_walks)
+    fgs_unserved = {}  # mk -> fg_unserved
     for mk, sol, stats in [
         ("A", sol_a, stats_a),
         ("B", sol_b, stats_b),
         ("C", sol_c, stats_c),
     ]:
         print(f"  Drawing Mode {mk} …")
-        fg_r, fg_w, cx, occ = _add_route_layer(m, G_unc, sol, mk, G_con)
+        fg_r, fg_w, cx, occ = _add_route_layer(m, G_unc, sol, mk, G_con,
+                                                 constraints=meta.get("constraints"))
         fgs[mk] = (fg_r, fg_w)
         crossings_dict[mk] = cx
         occupancies_dict[mk] = occ
         all_stats[mk] = stats
+        all_stats[mk]["satisfied"] = _count_satisfied(sol, G_unc, meta.get("constraints", {}))
+        fgs_unserved[mk] = _add_unserved_layer(m, sol, mk)
 
     fg_crossings = _add_crossing_markers(m, crossings_dict)
 
@@ -940,6 +1266,9 @@ def run(meta_path=None, output_path=None, iterations=None):
         map_var, fg_danger, fg_unclass,
         fgs["A"], fgs["B"], fgs["C"],
         fg_crossings,
+        fg_unserved_a=fgs_unserved.get("A"),
+        fg_unserved_b=fgs_unserved.get("B"),
+        fg_unserved_c=fgs_unserved.get("C"),
     )
     m.get_root().script.add_child(folium.Element(ctrl_js))
 
@@ -955,9 +1284,9 @@ def run(meta_path=None, output_path=None, iterations=None):
         meta, stage_walk, all_stats, crossings_dict,
         sol_a, sol_b, sol_c, G_unc, iters,
     )
-    metrics_path = os.path.splitext(output)[0] + "_metrics.json"
+    metrics_path = os.path.join(os.path.dirname(output), "output.json")
     with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
+        json.dump(_sanitise_floats(metrics), f, indent=2, ensure_ascii=False)
     print(f"  Metrics  : {metrics_path}")
 
     # ── Summary ──
@@ -982,11 +1311,11 @@ def run(meta_path=None, output_path=None, iterations=None):
 # ────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Three-Mode Comparison runner (reads meta.json)",
+        description="Three-Mode Comparison runner (reads input.json)",
     )
     parser.add_argument(
-        "--meta", default=None,
-        help="Path to meta.json (default: meta.json next to this script)",
+        "--input", default=None,
+        help="Path to input.json (default: input.json next to this script)",
     )
     parser.add_argument(
         "--iterations", type=int, default=None,
@@ -998,7 +1327,7 @@ def main():
     )
     args = parser.parse_args()
     run(
-        meta_path=args.meta,
+        input_path=args.input,
         output_path=args.output,
         iterations=args.iterations,
     )

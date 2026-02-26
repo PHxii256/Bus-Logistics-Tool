@@ -693,10 +693,42 @@ def snap_address_to_edge(coords, graph):
 
 
 
-# Cache for pedestrian-safe nodes
+# Road class rank for candidate-stop scoring (higher = more bus-useful)
+_ROAD_CLASS_RANK = {
+    "motorway"     : 6, "trunk"       : 5,
+    "primary"      : 4, "secondary"   : 3,
+    "tertiary"     : 2, "residential" : 1,
+    "living_street": 1, "unclassified": 1,
+}
+
+def _candidate_points(graph, node) -> int:
+    """Return 0, 1, or 2 — higher means node is a more useful bus-stop candidate.
+
+    +1  if the node is a real intersection (degree >= 3 distinct streets)
+    +1  if any adjacent edge is tertiary or higher road class
+
+    Used by find_safe_nodes_within_radius to sort walk-radius candidates so
+    intersection / arterial-adjacent nodes are preferred over mid-block
+    residential nodes of similar distance.
+    """
+    pts = 0
+    if graph.degree(node) >= 3:
+        pts += 1
+    best_rank = 0
+    for _, _, data in graph.edges(node, data=True):
+        hw = data.get("highway", "")
+        if isinstance(hw, list):
+            hw = hw[0]
+        best_rank = max(best_rank, _ROAD_CLASS_RANK.get(hw, 0))
+    if best_rank >= 2:   # tertiary or higher
+        pts += 1
+    return pts
+
+# Cache for pedestrian-safe nodes (stores full BFS result; scoring/truncation applied at call time)
 _safe_nodes_cache = {}
 
-def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_limit):
+def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_limit,
+                                   candidate_cfg=None):
     """Find all nodes reachable by walking within *walk_distance_limit* metres.
 
     Walking semantics
@@ -714,11 +746,31 @@ def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_li
     * On the constrained graph the BFS can walk along residential +
       tertiary streets but cannot cross primary / trunk / secondary.
     * On the unconstrained graph the BFS explores freely.
+
+    Candidate scoring (when *candidate_cfg* is provided)
+    ------------------------------------------------------
+    The full BFS result is cached, then ranked and truncated:
+
+    * The home snap node (distance 0) is **always** included first.
+    * Remaining nodes are sorted by ``(-points, walk_dist)``:
+        - 2-point nodes first  (intersection **and** tertiary+)
+        - 1-point nodes next   (one criterion met)
+        - 0-point nodes last   (mid-block residential)
+        - ties broken by ascending walk distance
+    * Truncated to ``candidate_cfg["max_candidates_per_student"]`` total.
+
+    Returns a list of ``(node_id, distance_metres)`` tuples.
     """
     lat, lon = coords
     cache_key = (lat, lon, walk_distance_limit)
     if cache_key in _safe_nodes_cache:
-        return _safe_nodes_cache[cache_key]
+        all_reachable = _safe_nodes_cache[cache_key]
+        # Apply scoring/truncation on the cached full result if config given
+        if candidate_cfg:
+            return _rank_and_truncate_candidates(
+                all_reachable, graph, fast_nearest_node(graph, lon, lat), candidate_cfg
+            )
+        return all_reachable
 
     start_node = fast_nearest_node(graph, lon, lat)
 
@@ -764,7 +816,26 @@ def find_safe_nodes_within_radius(coords, graph, radius_meters, walk_distance_li
                     queue.append((predecessor, new_dist))
 
     _safe_nodes_cache[cache_key] = safe_nodes
+
+    if candidate_cfg:
+        return _rank_and_truncate_candidates(safe_nodes, graph, start_node, candidate_cfg)
     return safe_nodes
+
+
+def _rank_and_truncate_candidates(all_nodes, graph, home_node, candidate_cfg):
+    """Sort *all_nodes* by (-points, dist) and truncate to max_candidates_per_student.
+
+    The home snap node is always inserted at position 0 regardless of score.
+    All other nodes compete on (points desc, distance asc).
+    """
+    max_k = candidate_cfg.get("max_candidates_per_student", 15)
+
+    home  = [(nid, d) for nid, d in all_nodes if nid == home_node]
+    others = [(nid, d) for nid, d in all_nodes if nid != home_node]
+    others.sort(key=lambda x: (-_candidate_points(graph, x[0]), x[1]))
+
+    result = home + others
+    return result[:max_k]
 
 
 # ============================================================================

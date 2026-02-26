@@ -91,6 +91,7 @@ def _generate_dataset(meta):
 # ────────────────────────────────────────────────────────────────────
 def _reset_caches():
     _alns._student_candidate_cache.clear()
+    _alns._student_candidate_dist.clear()
     _eng._MATRIX_CACHE.clear()
     _eng._MATRIX_CACHE_LENGTH.clear()
     _eng._path_cache.clear()
@@ -318,6 +319,7 @@ import networkx as nx
 from detour_engine import (
     find_shortest_path_with_turns,
     get_bearing_of_path,
+    _candidate_points as _cand_pts,
 )
 
 # Arrow text template — spaces pad between arrow glyphs
@@ -513,10 +515,18 @@ def _add_route_layer(m, G, sol, mode_key, G_con, constraints=None):
                 continue
             n_stu = len(stop.students)
             student_count += n_stu
+            student_ids = [s.id for s in stop.students]
+            student_ids_html = ", ".join(student_ids) if student_ids else "—"
             folium.CircleMarker(
                 location=stop.coords, radius=7,
                 color=c, fill=True, fillColor=c, fillOpacity=0.85,
-                popup=f"Mode {mode_key} {route.route_id} Stop-{si} ({n_stu} students)",
+                popup=folium.Popup(
+                    f'<div style="width:220px;font-size:12px;">'
+                    f'<b>Stop {si} — {route.route_id}</b><br>'
+                    f'Mode: {_MODE_NAMES[mode_key]}<br>'
+                    f'Students ({n_stu}): {student_ids_html}</div>',
+                    max_width=260,
+                ),
                 tooltip=f"{mode_key}-{route.route_id} Stop {si} ({n_stu} students)",
             ).add_to(fg_routes)
 
@@ -690,6 +700,100 @@ def _count_satisfied(sol, G, constraints):
     return satisfied
 
 
+def _add_candidate_layer(m, G, mode_key, sol, cand_cache, cand_dist):
+    """Add a FeatureGroup showing all candidate bus-stop nodes considered per student.
+
+    Each dot is a node that was evaluated as a possible stop for a specific student
+    during the ALNS insertion phase.  The dot's popup shows:
+      - Student ID and stage
+      - Score / points (0=residential dead-end, 1=intersection OR arterial, 2=both)
+      - Walk distance from home to this candidate node
+      - Whether this node was the student's actual assigned stop
+
+    Hidden by default — toggle via the layer control.
+    """
+    fg = FeatureGroup(name=f"{_MODE_NAMES[mode_key]} – Candidate Stops", show=False)
+
+    # Build lookup: student_id -> the node_id of their actual assigned stop (if served)
+    assigned = {}  # student_id -> stop_node_id
+    for route in sol.routes:
+        for stop in route.stops:
+            if stop.stop_type == 'school':
+                continue
+            for stu in stop.students:
+                assigned[stu.id] = stop.node_id
+
+    # Build lookup: student_id -> Student object
+    stu_by_id = {s.id: s for s in sol.students}
+
+    for sid, candidates in cand_cache.items():
+        student = stu_by_id.get(sid)
+        if student is None:
+            continue
+        dist_map = cand_dist.get(sid, {})
+        stage_name = (
+            student.school_stage.name
+            if hasattr(student.school_stage, 'name')
+            else str(student.school_stage)
+        )
+
+        for node_id, coords in candidates:
+            walk_m   = dist_map.get(node_id, 0.0)
+            pts      = _cand_pts(G, node_id)
+            is_home  = (walk_m == 0.0)
+            is_chosen = (assigned.get(sid) == node_id)
+
+            pts_label  = ['0 – residential dead-end',
+                          '1 – intersection OR arterial',
+                          '2 – intersection AND arterial'][pts]
+            home_flag  = ' 🏠 (home snap)' if is_home  else ''
+            chosen_flag = ' ✔ chosen stop' if is_chosen else ''
+
+            popup_html = (
+                f'<div style="width:230px;font-size:12px;">'
+                f'<b>Candidate Stop</b>{chosen_flag}{home_flag}<br>'
+                f'<b>Student: {sid}</b>&nbsp;({stage_name})<br>'
+                f'Score: <b>{pts_label}</b><br>'
+                f'Walk from home: <b>{walk_m:.0f} m</b><br>'
+                f'Node: {node_id}'
+                f'</div>'
+            )
+
+            # Colour coding: chosen=bright mode colour, 2pts=dark, 1pt=mid, 0pt=light grey
+            mode_c = _ROUTE_COLORS[mode_key][0]
+            if is_chosen:
+                fill_c = mode_c
+                r = 5
+                opacity = 0.9
+            elif pts == 2:
+                fill_c = '#333333'
+                r = 4
+                opacity = 0.75
+            elif pts == 1:
+                fill_c = '#888888'
+                r = 3
+                opacity = 0.65
+            else:
+                fill_c = '#bbbbbb'
+                r = 3
+                opacity = 0.50
+
+            folium.CircleMarker(
+                location=coords,
+                radius=r,
+                color=fill_c,
+                fill=True,
+                fillColor=fill_c,
+                fillOpacity=opacity,
+                weight=1,
+                popup=folium.Popup(popup_html, max_width=260),
+                tooltip=f"{sid} cand: {pts}pts, {walk_m:.0f}m walk",
+            ).add_to(fg)
+
+    fg.add_to(m)
+    return fg
+
+
 def _add_unserved_layer(m, sol, mode_key):
     """Add a FeatureGroup with X-pin markers for every unserved student in *sol*."""
     show = mode_key in ("A", "B")
@@ -747,6 +851,7 @@ def _build_custom_layer_control_js(
     fgs_a, fgs_b, fgs_c,
     fg_crossings,
     fg_unserved_a=None, fg_unserved_b=None, fg_unserved_c=None,
+    fg_cands_a=None,   fg_cands_b=None,   fg_cands_c=None,
 ):
     """Return JS that adds a titled, grouped layer-control widget to the map.
 
@@ -780,6 +885,19 @@ def _build_custom_layer_control_js(
                     [{vu}],
                     map.hasLayer({vu}));"""
 
+    candidate_rows = ""
+    for fg_c2, label in [
+        (fg_cands_a, 'Constrained – Candidate Stops'),
+        (fg_cands_b, 'Unconstrained – Candidate Stops'),
+        (fg_cands_c, 'Door-to-Door – Candidate Stops'),
+    ]:
+        if fg_c2 is not None:
+            vca = fg_c2.get_name()
+            candidate_rows += f"""
+                row('{label}',
+                    [{vca}],
+                    map.hasLayer({vca}));"""
+
     return f"""
     window.addEventListener('load', function() {{
         var m = {map_var};
@@ -790,7 +908,8 @@ def _build_custom_layer_control_js(
                     'leaflet-control-layers leaflet-control-layers-expanded');
                 c.style.cssText =
                     'padding:10px 14px;min-width:210px;font-size:13px;' +
-                    'font-family:Arial,sans-serif;line-height:1.4;';
+                    'font-family:Arial,sans-serif;line-height:1.4;' +
+                    'max-height:calc(100vh - 320px);overflow-y:auto;';
                 L.DomEvent.disableClickPropagation(c);
                 L.DomEvent.disableScrollPropagation(c);
                 // title
@@ -835,6 +954,17 @@ def _build_custom_layer_control_js(
                     [{v_danger}], map.hasLayer({v_danger}));
                 row('Unclassified Roads (no student placement)',
                     [{v_unclass}], map.hasLayer({v_unclass}));{crossings_row}{unserved_rows}
+                sep();
+                var hdr2 = L.DomUtil.create('div', '', c);
+                hdr2.textContent = 'Candidate Stop Inspector';
+                hdr2.style.cssText =
+                    'font-weight:bold;font-size:12px;margin:6px 0 2px;color:#555;';
+                var note = L.DomUtil.create('div', '', c);
+                note.textContent = 'Dots = candidate stops evaluated per student.';
+                note.style.cssText = 'font-size:10px;color:#888;margin-bottom:1px;';
+                var note2 = L.DomUtil.create('div', '', c);
+                note2.textContent = 'Dark=2pts, Grey=1pt, Light=0pt. Click for details.';
+                note2.style.cssText = 'font-size:10px;color:#888;margin-bottom:4px;';{candidate_rows}
                 return c;
             }}
         }});
@@ -1165,6 +1295,9 @@ def run(input_path=None, output_path=None, iterations=None):
         data_a, G_con, iterations=iters, stage_walk_limits=stage_walk,
         G_drive=G_unc)
     stats_a["label"] = "Mode-A"
+    # Snapshot candidate data before caches are cleared for next mode
+    cands_a    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
+    cand_dist_a = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
     print(f"  [A] {stats_a['served']}/{stats_a['total']} served | "
           f"routes={stats_a['routes']} | time={stats_a['total_time']:.1f} min | "
           f"{stats_a['runtime']:.1f}s")
@@ -1181,6 +1314,8 @@ def run(input_path=None, output_path=None, iterations=None):
     sol_b, stats_b, school_b = run_algorithm(data_b, G_unc, iterations=iters,
                                               G_drive=G_unc)
     stats_b["label"] = "Mode-B"
+    cands_b    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
+    cand_dist_b = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
     print(f"  [B] {stats_b['served']}/{stats_b['total']} served | "
           f"routes={stats_b['routes']} | time={stats_b['total_time']:.1f} min | "
           f"{stats_b['runtime']:.1f}s")
@@ -1197,6 +1332,8 @@ def run(input_path=None, output_path=None, iterations=None):
     sol_c, stats_c, school_c = run_algorithm(data_c, G_unc, iterations=iters,
                                               G_drive=G_unc)
     stats_c["label"] = "Mode-C"
+    cands_c    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
+    cand_dist_c = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
     print(f"  [C] {stats_c['served']}/{stats_c['total']} served | "
           f"routes={stats_c['routes']} | time={stats_c['total_time']:.1f} min | "
           f"{stats_c['runtime']:.1f}s")
@@ -1216,7 +1353,7 @@ def run(input_path=None, output_path=None, iterations=None):
     ).add_to(m)
 
     # Dangerous roads layer
-    fg_danger = FeatureGroup(name="\u26A0 Dangerous Roads (unsafe to cross)", show=True)
+    fg_danger = FeatureGroup(name="Dangerous Roads (unsafe to cross)", show=True)
     danger_segs = _extract_segments(G_con, center[0], center[1], "dangerous")
     for seg in danger_segs:
         folium.PolyLine(seg, color="#e74c3c", weight=3, opacity=0.45,
@@ -1258,6 +1395,16 @@ def run(input_path=None, output_path=None, iterations=None):
         all_stats[mk]["satisfied"] = _count_satisfied(sol, G_unc, meta.get("constraints", {}))
         fgs_unserved[mk] = _add_unserved_layer(m, sol, mk)
 
+    # Candidate stop inspector layers (one per mode, hidden by default)
+    cand_data = {
+        "A": (sol_a, cands_a,  cand_dist_a, G_con),
+        "B": (sol_b, cands_b,  cand_dist_b, G_unc),
+        "C": (sol_c, cands_c,  cand_dist_c, G_unc),
+    }
+    fgs_cands = {}
+    for mk, (sol, cds, cdst, G_mk) in cand_data.items():
+        fgs_cands[mk] = _add_candidate_layer(m, G_mk, mk, sol, cds, cdst)
+
     fg_crossings = _add_crossing_markers(m, crossings_dict)
 
     # Custom grouped layer control (title + 3 mode checkboxes, no radio buttons)
@@ -1269,6 +1416,9 @@ def run(input_path=None, output_path=None, iterations=None):
         fg_unserved_a=fgs_unserved.get("A"),
         fg_unserved_b=fgs_unserved.get("B"),
         fg_unserved_c=fgs_unserved.get("C"),
+        fg_cands_a=fgs_cands.get("A"),
+        fg_cands_b=fgs_cands.get("B"),
+        fg_cands_c=fgs_cands.get("C"),
     )
     m.get_root().script.add_child(folium.Element(ctrl_js))
 

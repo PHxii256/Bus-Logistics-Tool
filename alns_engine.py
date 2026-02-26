@@ -182,6 +182,10 @@ def regret_repair(solution, k=2):
 
 # Cache candidate nodes per student (BFS + safe_nodes don't change between iterations)
 _student_candidate_cache = {}  # student_id -> list of (node_id, coords)
+_student_candidate_dist   = {}  # student_id -> {node_id: walk_dist_m}  (0 for frontage)
+
+# Candidate configuration set by ALNSEngine before each run (max_candidates_per_student, etc.)
+_alns_candidate_cfg = {}
 
 def _get_insertions_for_route(student, route, graph, frontage_info):
     """Helper to find all possible valid insertion points for a student in ONE route.
@@ -195,16 +199,24 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
     if student.id in _student_candidate_cache:
         candidate_nodes = _student_candidate_cache[student.id]
     else:
+        max_k = _alns_candidate_cfg.get("max_candidates_per_student", 15)
         # Build candidate list: frontage node + walk candidates (if applicable)
         candidate_nodes = [(frontage_node_id, frontage_coords)]
+        dist_map = {frontage_node_id: 0.0}  # node_id -> walk distance (metres)
         
         if student.walk_radius > 0:
             from detour_engine import find_safe_nodes_within_radius
-            safe_nodes = find_safe_nodes_within_radius(student.coords, graph, 500, student.walk_radius)
-            for node_id, dist in sorted(safe_nodes, key=lambda x: x[1]):
+            # Pass candidate_cfg so results are scored (intersections/arterials preferred)
+            # and already returned in (-points, dist) order.
+            cand_cfg = _alns_candidate_cfg if _alns_candidate_cfg else None
+            safe_nodes = find_safe_nodes_within_radius(
+                student.coords, graph, 500, student.walk_radius, candidate_cfg=cand_cfg
+            )
+            for node_id, dist in safe_nodes:  # already sorted by scoring function
                 if node_id != frontage_node_id:
                     coords = (graph.nodes[node_id]['y'], graph.nodes[node_id]['x'])
                     candidate_nodes.append((node_id, coords))
+                    dist_map[node_id] = float(dist)
         
         # Bus-reachable fallback: if frontage is unreachable, find nearby reachable nodes
         # via bidirectional BFS (walking ignores one-way constraints)
@@ -219,7 +231,7 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
                 max_walk = get_walk_absolute_max(student.walk_radius)  # Stage-based
                 visited = set()
                 bfs_queue = [(center_node, 0)]
-                while bfs_queue and len(candidate_nodes) < 10:
+                while bfs_queue and len(candidate_nodes) < max_k:
                     node, dist = bfs_queue.pop(0)
                     if node in visited or dist > max_walk:
                         continue
@@ -230,6 +242,7 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
                         if not any(c[0] == node for c in candidate_nodes):
                             coords = (graph.nodes[node]['y'], graph.nodes[node]['x'])
                             candidate_nodes.append((node, coords))
+                            dist_map[node] = float(dist)
                     # Expand along out-edges
                     for neighbor in graph.successors(node):
                         ed = graph.get_edge_data(node, neighbor)
@@ -247,8 +260,9 @@ def _get_insertions_for_route(student, route, graph, frontage_info):
                             if new_dist <= max_walk:
                                 bfs_queue.append((predecessor, new_dist))
         
-        candidate_nodes = candidate_nodes[:8]
+        candidate_nodes = candidate_nodes[:max_k]
         _student_candidate_cache[student.id] = candidate_nodes
+        _student_candidate_dist[student.id]   = dist_map
     
     # Start and end stops are fixed (Depot/School), strictly insert between
     start_pos = 1 if len(route.stops) >= 2 else 0
@@ -328,7 +342,15 @@ def _apply_insertion(solution, student, result):
 
 class ALNSEngine:
     def __init__(self, initial_solution, iterations=100, temp=1000, cooling=0.98,
-                 time_budget_seconds=None):
+                 time_budget_seconds=None, max_candidates_per_student=None):
+        # Configure module-level candidate settings and clear stale cache
+        global _alns_candidate_cfg, _student_candidate_cache, _student_candidate_dist
+        _student_candidate_cache.clear()  # invalidate cache from any previous run
+        _student_candidate_dist.clear()
+        _alns_candidate_cfg = {}
+        if max_candidates_per_student is not None:
+            _alns_candidate_cfg["max_candidates_per_student"] = max_candidates_per_student
+
         self.curr_sol = initial_solution.clone()
         self.best_sol = initial_solution.clone()
         self.iterations = iterations

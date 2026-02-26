@@ -290,13 +290,15 @@ def run_algorithm(data: dict, G, iterations: int = None,
             if stage_name in stage_walk_limits:
                 s.walk_radius = stage_walk_limits[stage_name]
 
-    iters = iterations or algo_cfg.get("iterations", 60)
+    iters  = iterations or algo_cfg.get("iterations", 60)
     budget = time_budget_seconds or algo_cfg.get("time_budget_seconds", None)
+    max_cands = algo_cfg.get("max_candidates_per_student", None)
     # Walking BFS uses G (may be constrained); bus routing uses G_drive (unconstrained)
     precompute_matrix(students, routes, G, G_drive=G_drive)
 
     initial = ServiceSolution(students, routes, G_drive)
-    engine  = ALNSEngine(initial, iterations=iters, time_budget_seconds=budget)
+    engine  = ALNSEngine(initial, iterations=iters, time_budget_seconds=budget,
+                         max_candidates_per_student=max_cands)
     t0      = _time.time()
     best    = engine.run()
     elapsed = _time.time() - t0

@@ -253,7 +253,7 @@ def run_generate_routes(data, G, input_file_path):
 
 def run_algorithm(data: dict, G, iterations: int = None,
                   stage_walk_limits: dict = None, save=False,
-                  G_drive=None):
+                  G_drive=None, time_budget_seconds: float = None):
     """Run ALNS on *data* using graph *G* and return (best_solution, stats_dict, school_coords).
 
     Parameters
@@ -291,11 +291,12 @@ def run_algorithm(data: dict, G, iterations: int = None,
                 s.walk_radius = stage_walk_limits[stage_name]
 
     iters = iterations or algo_cfg.get("iterations", 60)
+    budget = time_budget_seconds or algo_cfg.get("time_budget_seconds", None)
     # Walking BFS uses G (may be constrained); bus routing uses G_drive (unconstrained)
     precompute_matrix(students, routes, G, G_drive=G_drive)
 
     initial = ServiceSolution(students, routes, G_drive)
-    engine  = ALNSEngine(initial, iterations=iters)
+    engine  = ALNSEngine(initial, iterations=iters, time_budget_seconds=budget)
     t0      = _time.time()
     best    = engine.run()
     elapsed = _time.time() - t0

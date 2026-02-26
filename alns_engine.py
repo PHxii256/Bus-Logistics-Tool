@@ -327,12 +327,14 @@ def _apply_insertion(solution, student, result):
 # ============================================================================
 
 class ALNSEngine:
-    def __init__(self, initial_solution, iterations=100, temp=1000, cooling=0.98):
+    def __init__(self, initial_solution, iterations=100, temp=1000, cooling=0.98,
+                 time_budget_seconds=None):
         self.curr_sol = initial_solution.clone()
         self.best_sol = initial_solution.clone()
         self.iterations = iterations
         self.temp = temp
         self.cooling = cooling
+        self.time_budget_seconds = time_budget_seconds  # wall-clock budget (None = use iterations only)
         
         self.destroy_ops = [random_removal, worst_cost_removal]
         self.repair_ops = [greedy_repair, regret_repair]
@@ -353,11 +355,19 @@ class ALNSEngine:
         t = self.temp
         start_time = time.time()
         block_start_time = start_time
-        
-        print(f"Starting ALNS Optimization with {self.iterations} iterations...")
+
+        if self.time_budget_seconds:
+            print(f"Starting ALNS Optimization (time budget: {self.time_budget_seconds}s, "
+                  f"max {self.iterations} iterations)...")
+        else:
+            print(f"Starting ALNS Optimization with {self.iterations} iterations...")
         print(f"Initial State: {self.curr_sol}")
 
         for i in range(self.iterations):
+            # ── Time-budget early exit ──
+            if self.time_budget_seconds and (time.time() - start_time) >= self.time_budget_seconds:
+                print(f"  Time budget of {self.time_budget_seconds}s reached at iteration {i+1} — stopping.")
+                break
             # Selection
             d_idx = self._select_op(self.d_weights)
             r_idx = self._select_op(self.r_weights)
@@ -416,6 +426,18 @@ class ALNSEngine:
         print(f"Optimization Complete.")
         print(f"Total Time: {total_elapsed:.2f}s")
         print(f"Final State: {self.best_sol}")
+
+        # ── Final repair pass: rescue any remaining unserved students ──
+        unserved_count = sum(1 for s in self.best_sol.students if not s.is_served)
+        if unserved_count > 0:
+            print(f"Running final repair pass on {unserved_count} unserved students...")
+            greedy_repair(self.best_sol)
+            rescued = unserved_count - sum(1 for s in self.best_sol.students if not s.is_served)
+            if rescued > 0:
+                print(f"  Repair pass rescued {rescued} student(s).")
+            else:
+                print(f"  Repair pass: no additional students could be inserted.")
+
         return self.best_sol
 
     def _select_op(self, weights):

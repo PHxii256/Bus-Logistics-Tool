@@ -35,6 +35,13 @@ PAPER WRITING (in order):
   [ ] 5. Route map figure: best seed from Experiment 1
          Use existing Folium output — screenshot is fine
 
+
+to explore:
+creating the potential bus stops per student, have one at the student home
+and one at every intersection or corner or turn every x meters untill all reachable
+streets within the walking radius have a path of potential stop nodes
+is it currently working this way?
+
 SKIP UNLESS EXTRA TIME:
   [ ] gmaps post-optimization display (Folium is sufficient)
   [ ] Real Cairo school dataset (synthetic dataset is sufficient)

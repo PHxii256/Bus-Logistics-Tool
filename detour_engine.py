@@ -216,6 +216,7 @@ def calculate_weighted_path_time(graph, path_nodes):
 _path_cache = {}
 _MATRIX_CACHE = {}       # (source, target) -> travel_time in minutes
 _MATRIX_CACHE_LENGTH = {} # (source, target) -> length in meters
+_DIJKSTRA_DONE = set()   # source nodes we've already run single-source Dijkstra on
 
 # Graph-free mode: pre-registered (lat, lon) -> (node_id, (lat, lon)) mappings.
 # When set, snap_address_to_edge returns immediately without touching OSMnx.
@@ -400,25 +401,63 @@ def precalculate_distance_matrix(graph, critical_node_ids, fast_mode=False):
     start_time = time.time()
 
     if fast_mode:
-        # Batch single-source Dijkstra: one run per source covers all targets
-        # cutoff=60min limits exploration - Cairo routes are < 50 min in practice
+        # Batch single-source Dijkstra: one run per source covers all targets.
+        # cutoff=60min limits exploration – Cairo routes are < 50 min in practice.
+        #
+        # Optimisation: track which sources have already had Dijkstra run via
+        # _DIJKSTRA_DONE.  When the node list grows between calls (e.g. Mode A
+        # → Mode B adds ~55 new candidate nodes), we avoid re-running Dijkstra
+        # from all 700+ old sources.  Instead:
+        #   • Forward Dijkstra from NEW sources  → fills (new → all)
+        #   • Reverse Dijkstra from NEW targets  → fills (old → new)
+        # This turns 791 Dijkstra calls into ~110, saving ~300 s.
         CUTOFF_MINUTES = 60.0
-        for src in node_list:
+        node_set  = set(node_list)
+        new_nodes = [n for n in node_list if n not in _DIJKSTRA_DONE]
+        old_nodes = [n for n in node_list if n in _DIJKSTRA_DONE]
+
+        # --- forward Dijkstra from new sources only ---
+        for src in new_nodes:
             try:
                 dist_time = nx.single_source_dijkstra_path_length(
                     graph, src, weight='travel_time', cutoff=CUTOFF_MINUTES)
             except Exception:
                 dist_time = {}
             for tgt in node_list:
-                if tgt == src:
-                    continue
-                t = dist_time.get(tgt, float('inf'))
-                _MATRIX_CACHE[(src, tgt)] = t
-                # Approximate length from travel_time (assume 30 kph avg = 500 m/min)
-                _MATRIX_CACHE_LENGTH[(src, tgt)] = t * 500.0 if t < float('inf') else float('inf')
+                if tgt != src and (src, tgt) not in _MATRIX_CACHE:
+                    t = dist_time.get(tgt, float('inf'))
+                    _MATRIX_CACHE[(src, tgt)] = t
+                    _MATRIX_CACHE_LENGTH[(src, tgt)] = t * 500.0 if t < float('inf') else float('inf')
+            _DIJKSTRA_DONE.add(src)
+
+        # --- reverse Dijkstra: fill (old_src → new_tgt) pairs ---
+        # Running Dijkstra on the reversed graph from a new target T gives
+        # dist_rev(T, S) = dist(S → T) in the original graph.
+        if old_nodes and new_nodes:
+            # Identify which new nodes are actually needed as targets for old sources
+            new_tgts = [t for t in new_nodes
+                        if any((s, t) not in _MATRIX_CACHE for s in old_nodes)]
+            if new_tgts:
+                G_rev = graph.reverse(copy=False)   # view – O(1) memory
+                for tgt in new_tgts:
+                    try:
+                        dist_rev = nx.single_source_dijkstra_path_length(
+                            G_rev, tgt, weight='travel_time', cutoff=CUTOFF_MINUTES)
+                    except Exception:
+                        dist_rev = {}
+                    for src in old_nodes:
+                        if (src, tgt) not in _MATRIX_CACHE:
+                            t = dist_rev.get(src, float('inf'))
+                            _MATRIX_CACHE[(src, tgt)] = t
+                            _MATRIX_CACHE_LENGTH[(src, tgt)] = t * 500.0 if t < float('inf') else float('inf')
+
         elapsed = time.time() - start_time
+        fwd_cnt = len(new_nodes)
+        rev_cnt = len(new_nodes) if old_nodes and new_nodes else 0
+        skip_note = (f", {len(old_nodes)}/{len(node_list)} sources skipped "
+                     f"(already cached), {fwd_cnt} fwd + {rev_cnt} rev Dijkstra") if old_nodes else ""
         print(f"Pre-calculation complete (fast). Matrix entries: {len(_MATRIX_CACHE)}, "
-              f"Length entries: {len(_MATRIX_CACHE_LENGTH)}, Time: {elapsed:.1f}s")
+              f"Length entries: {len(_MATRIX_CACHE_LENGTH)}, Time: {elapsed:.1f}s{skip_note}")
         return
 
     # ---- accurate A* mode (original behaviour) ----

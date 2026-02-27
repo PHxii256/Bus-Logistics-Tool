@@ -164,7 +164,8 @@ def setup_graph(meta: dict = None, unconstrained: bool = False):
 # MATRIX PRECOMPUTATION
 # ============================================================================
 
-def precompute_matrix(students, routes, G, fast_mode=None, G_drive=None):
+def precompute_matrix(students, routes, G, fast_mode=None, G_drive=None,
+                      max_candidates=15):
     """Build the distance matrix for ALNS.
 
     Parameters
@@ -173,19 +174,27 @@ def precompute_matrix(students, routes, G, fast_mode=None, G_drive=None):
     G_drive : graph used for bus driving distances (should always be the
               full unconstrained network).  Falls back to *G* if not given,
               preserving backward-compatibility.
+    max_candidates : int
+        Include up to this many walk-reachable candidate nodes per student
+        in the precomputed matrix.  Should match or exceed
+        ``max_candidates_per_student`` used by the ALNS engine (default 15)
+        so that insertion-cost checks never fall back to A*.
     """
     if G_drive is None:
         G_drive = G
     print("[Optimization] Preparing distance matrix...")
     critical_nodes = set()
     student_frontages = {}
+    # Collect ALL candidate nodes ALNS will actually use so the precomputed
+    # matrix covers every node the optimizer can insert at.  The old [:5]
+    # limit caused massive A* fallback spikes on 600K-node graphs.
     for s in students:
         node_id, _ = snap_address_to_edge(s.coords, G)
         critical_nodes.add(node_id)
         student_frontages[s.id] = node_id
         if s.walk_radius > 0:
             safe_nodes = find_safe_nodes_within_radius(s.coords, G, 500, s.walk_radius)
-            for safe_node_id, _ in sorted(safe_nodes, key=lambda x: x[1])[:5]:
+            for safe_node_id, _ in safe_nodes[:max_candidates]:
                 critical_nodes.add(safe_node_id)
     school_node = None
     for route in routes:
@@ -292,9 +301,9 @@ def run_algorithm(data: dict, G, iterations: int = None,
 
     iters  = iterations or algo_cfg.get("iterations", 60)
     budget = time_budget_seconds or algo_cfg.get("time_budget_seconds", None)
-    max_cands = algo_cfg.get("max_candidates_per_student", None)
+    max_cands = algo_cfg.get("max_candidates_per_student", 15)
     # Walking BFS uses G (may be constrained); bus routing uses G_drive (unconstrained)
-    precompute_matrix(students, routes, G, G_drive=G_drive)
+    precompute_matrix(students, routes, G, G_drive=G_drive, max_candidates=max_cands)
 
     initial = ServiceSolution(students, routes, G_drive)
     engine  = ALNSEngine(initial, iterations=iters, time_budget_seconds=budget,
@@ -329,6 +338,174 @@ def run_algorithm(data: dict, G, iterations: int = None,
     }
 
     return best, stats, school_coords
+
+
+def find_minimum_fleet(data: dict, G, iterations: int = None,
+                       stage_walk_limits: dict = None,
+                       G_drive=None, time_budget_seconds: float = None):
+    """Search for the smallest fleet size that can serve every student.
+
+    Iterates from the theoretical minimum number of buses (⌈students/capacity⌉)
+    upward, stopping as soon as a fleet size achieves 100 % service rate.  If no
+    fleet size within the available buses serves everyone, the result with the
+    highest service count is kept.
+
+    Parameters
+    ----------
+    data : dict   – standard input dict; ``data["data"]["buses"]`` is sliced to
+                    select fleet size.
+    G / G_drive   – passed through to :func:`run_algorithm`.
+    iterations, stage_walk_limits, time_budget_seconds – passed through.
+
+    Returns
+    -------
+    tuple : (best_k, ServiceSolution, stats_dict, school_coords)
+        ``best_k`` is the minimum fleet size found.
+        ``stats["buses_used"]`` is set to *best_k*.
+    """
+    import copy as _copy
+
+    base_buses  = data["data"]["buses"]
+    n_students  = len(data["data"]["students"])
+    capacity    = base_buses[0].get("capacity", 60) if base_buses else 60
+    k_max       = len(base_buses)
+    # Ceiling division without math module
+    k_min = max(1, -(-n_students // capacity))
+
+    best_k, best_sol, best_stats, best_school = k_max, None, None, None
+
+    print(f"\n[FleetSearch] {n_students} students, capacity {capacity}, "
+          f"searching k={k_min}..{k_max}")
+
+    constraints = data.get("meta", {}).get("constraints", {})
+    fleet_log   = []
+
+    for k in range(k_min, k_max + 1):
+        trial = _copy.deepcopy(data)
+        trial["data"]["buses"] = trial["data"]["buses"][:k]
+
+        sol, stats, school = run_algorithm(
+            trial, G,
+            iterations=iterations,
+            stage_walk_limits=stage_walk_limits,
+            G_drive=G_drive,
+            time_budget_seconds=time_budget_seconds,
+        )
+
+        served  = stats["served"]
+        total   = stats["total"]
+        capacity_k = trial["data"]["buses"][0].get("capacity", 60)
+
+        unserved_students = [s for s in sol.students if not s.is_served]
+        reasons = _diagnose_unserved(unserved_students, sol, capacity_k, constraints)
+
+        fleet_log.append({
+            "k":                k,
+            "served":           served,
+            "unserved":         total - served,
+            "feasible":         served == total,
+            "runtime_s":        stats["runtime"],
+            "rejection_reasons": reasons,
+        })
+
+        diag = "  ".join(f"{r}: {c}" for r, c in reasons.items()) if reasons else "—"
+        print(f"  Fleet {k}: {served}/{total} served  [{diag}]")
+
+        if best_sol is None or served > best_stats["served"]:
+            best_k, best_sol, best_stats, best_school = k, sol, stats, school
+
+        if served == total:
+            print(f"  → All students served with {k} bus(es) — minimum found.")
+            break
+
+    best_stats["buses_used"]           = best_k
+    best_stats["fleet_search_log"]     = fleet_log
+    best_stats["fleet_search_summary"] = _summarise_fleet_search(fleet_log)
+    return best_k, best_sol, best_stats, best_school
+
+
+def _diagnose_unserved(unserved_students, sol, capacity, constraints):
+    """Categorise why each unserved student wasn't placed.
+    Returns {reason_key: count} with zero-count keys omitted.
+    """
+    import math as _math
+    if not unserved_students:
+        return {}
+
+    con     = constraints or {}
+    enabled = bool(con.get("enabled", True))
+    k_mult  = float(con.get("ride_time_multiplier", 2.5))
+    fl      = float(con.get("floor_minutes", 45))
+    ce      = float(con.get("ceiling_minutes", 60))
+
+    all_full = all(r.get_student_count() >= capacity for r in sol.routes)
+
+    reasons = {}
+    for s in unserved_students:
+        if all_full:
+            reasons["all_routes_at_capacity"] = reasons.get("all_routes_at_capacity", 0) + 1
+            continue
+
+        if enabled:
+            dt = getattr(s, "direct_time_to_school", None)
+            if dt is not None and _math.isfinite(dt) and dt > 0:
+                cap = max(fl, min(k_mult * dt, dt + ce))
+                if cap < 20:
+                    reasons["ride_time_cap_too_tight"] = reasons.get("ride_time_cap_too_tight", 0) + 1
+                    continue
+
+        if getattr(s, "walk_radius", 0) == 0:
+            reasons["zero_walk_radius_no_candidates"] = reasons.get("zero_walk_radius_no_candidates", 0) + 1
+            continue
+
+        reasons["search_budget_exhausted"] = reasons.get("search_budget_exhausted", 0) + 1
+
+    return {k: v for k, v in reasons.items() if v > 0}
+
+
+def _summarise_fleet_search(fleet_log):
+    """Human-readable explanation of the fleet search outcome."""
+    if not fleet_log:
+        return "no search performed"
+
+    feasible = [e for e in fleet_log if e["feasible"]]
+    if feasible:
+        k = feasible[0]["k"]
+        if len(fleet_log) == 1 and fleet_log[0]["feasible"]:
+            return f"k={k} is the theoretical minimum and already serves all students"
+        return f"k={k} is the minimum feasible fleet size"
+
+    last  = max(fleet_log, key=lambda e: e["served"])
+    parts = [
+        f"No fleet size in range {fleet_log[0]['k']}..{fleet_log[-1]['k']} served all students. "
+        f"Best: k={last['k']} with {last['served']}/{last['served'] + last['unserved']} served, "
+        f"{last['unserved']} unserved."
+    ]
+    reasons = last.get("rejection_reasons", {})
+    if reasons.get("ride_time_cap_too_tight"):
+        n = reasons["ride_time_cap_too_tight"]
+        parts.append(
+            f"{n} student(s) have ride-time caps too tight to fit into any multi-stop route — "
+            f"early-boarding students accumulate too much ride time at this fleet size."
+        )
+    if reasons.get("all_routes_at_capacity"):
+        n = reasons["all_routes_at_capacity"]
+        parts.append(
+            f"{n} student(s) could not be placed because all routes were at seating capacity."
+        )
+    if reasons.get("zero_walk_radius_no_candidates"):
+        n = reasons["zero_walk_radius_no_candidates"]
+        parts.append(
+            f"{n} student(s) have walk_radius=0 with no candidate stop found."
+        )
+    if reasons.get("search_budget_exhausted"):
+        n = reasons["search_budget_exhausted"]
+        parts.append(
+            f"{n} student(s) likely unserved due to ALNS budget exhaustion — "
+            f"try increasing time_budget_seconds."
+        )
+    return " ".join(parts)
+
 
 # ============================================================================
 # MODE 2: change_location

@@ -35,7 +35,7 @@ import detour_engine as _eng
 import alns_engine   as _alns
 
 from run_algorithm import (
-    setup_graph, precompute_matrix, run_algorithm,
+    setup_graph, precompute_matrix, run_algorithm, find_minimum_fleet,
     DEFAULT_STAGE_WALK_LIMITS,
 )
 from data_loader   import load_mode1_input
@@ -89,16 +89,27 @@ def _generate_dataset(meta):
 # ────────────────────────────────────────────────────────────────────
 # Cache helpers
 # ────────────────────────────────────────────────────────────────────
-def _reset_caches():
+def _reset_caches(keep_matrix=False, keep_walk=False):
+    """Clear caches between modes.
+
+    keep_matrix=True : retain _MATRIX_CACHE / _MATRIX_CACHE_LENGTH / _path_cache.
+        All three modes use G_unc for bus routing so matrix entries are reusable
+        across the full pipeline without recomputing Dijkstra.
+    keep_walk=True   : retain _WALK_DIST_CACHE / _WALK_GRAPH / _safe_nodes_cache.
+        Safe when the walking graph is unchanged (Mode B→C both use G_unc).
+    """
     _alns._student_candidate_cache.clear()
     _alns._student_candidate_dist.clear()
-    _eng._MATRIX_CACHE.clear()
-    _eng._MATRIX_CACHE_LENGTH.clear()
-    _eng._path_cache.clear()
-    _eng._WALK_DIST_CACHE.clear()
+    if not keep_matrix:
+        _eng._MATRIX_CACHE.clear()
+        _eng._MATRIX_CACHE_LENGTH.clear()
+        _eng._path_cache.clear()
+        _eng._DIJKSTRA_DONE.clear()
+    if not keep_walk:
+        _eng._WALK_DIST_CACHE.clear()
+        _eng._WALK_GRAPH = None
+        _eng._safe_nodes_cache.clear()
     _eng._STUDENT_NODE_CACHE.clear()
-    _eng._WALK_GRAPH = None
-    _eng._safe_nodes_cache.clear()
 
 
 def _prebuild_ball_tree(G):
@@ -625,33 +636,35 @@ def _add_route_layer(m, G, sol, mode_key, G_con, constraints=None):
     return fg_routes, fg_walks, crossings, occupancies
 
 
-def _count_satisfied(sol, G, constraints):
-    """Count served students whose ride time is within the cap.
+def _count_satisfied_per_route(sol, G, constraints):
+    """Return {route_id: satisfied_count} for all active routes.
 
     Respects ``bidirectional_check``:
       True  → satisfied when AM **or** PM ride ≤ cap (lenient: both must fail to fail)
       False → satisfied when AM ride ≤ cap (strict)
 
-    Students without a finite direct time are counted as satisfied (no basis to reject).
+    Students without a finite direct time are counted as satisfied.
     """
-    con      = constraints or {}
-    k        = float(con.get('ride_time_multiplier', 2.5))
-    fl       = float(con.get('floor_minutes',        45))
-    ce       = float(con.get('ceiling_minutes',      60))
-    bidir    = bool(con.get('bidirectional_check',   True))
-    caps_on  = bool(con.get('enabled',               True))
-
-    if not caps_on:
-        # caps disabled — every served student is trivially satisfied
-        return sum(1 for s in sol.students if getattr(s, 'is_served', False))
+    con     = constraints or {}
+    k       = float(con.get('ride_time_multiplier', 2.5))
+    fl      = float(con.get('floor_minutes',        45))
+    ce      = float(con.get('ceiling_minutes',      60))
+    bidir   = bool(con.get('bidirectional_check',   True))
+    caps_on = bool(con.get('enabled',               True))
 
     def _cap(d):
         if d is None or d <= 0 or not math.isfinite(d):
             return float('inf')
         return max(fl, min(k * d, d + ce))
 
-    satisfied = 0
+    result = {}
     for route in sol.routes:
+        if route.get_student_count() == 0:
+            continue
+        if not caps_on:
+            result[route.route_id] = route.get_student_count()
+            continue
+        satisfied = 0
         school_node = route.stops[-1].node_id
         for stop in route.stops:
             if stop.stop_type == 'school':
@@ -659,12 +672,9 @@ def _count_satisfied(sol, G, constraints):
             stop_idx = next((i for i, s in enumerate(route.stops) if s is stop), -1)
             if stop_idx == -1:
                 continue
-
-            # AM ride: boarding stop → school
             ride_am = calculate_route_time_from_matrix(route.stops[stop_idx:], G)
             if ride_am >= 9999:
                 ride_am = float('inf')
-
             for student in stop.students:
                 s_node = _eng.fast_nearest_node(G, student.coords[1], student.coords[0])
                 try:
@@ -674,10 +684,8 @@ def _count_satisfied(sol, G, constraints):
                         direct_am = None
                 except Exception:
                     direct_am = None
-
                 cap_am = _cap(direct_am)
                 am_ok  = ride_am <= cap_am
-
                 if not bidir:
                     if am_ok:
                         satisfied += 1
@@ -685,7 +693,6 @@ def _count_satisfied(sol, G, constraints):
                     if am_ok:
                         satisfied += 1
                     else:
-                        # Check PM direction
                         ride_pm = _compute_pm_ride_time(route, stop, G)
                         try:
                             _, direct_pm = find_shortest_path_with_turns(
@@ -694,10 +701,15 @@ def _count_satisfied(sol, G, constraints):
                                 direct_pm = None
                         except Exception:
                             direct_pm = None
-                        cap_pm = _cap(direct_pm)
-                        if ride_pm <= cap_pm:
+                        if ride_pm <= _cap(direct_pm):
                             satisfied += 1
-    return satisfied
+        result[route.route_id] = satisfied
+    return result
+
+
+def _count_satisfied(sol, G, constraints):
+    """Total satisfied count (sum of _count_satisfied_per_route)."""
+    return sum(_count_satisfied_per_route(sol, G, constraints).values())
 
 
 def _add_candidate_layer(m, G, mode_key, sol, cand_cache, cand_dist):
@@ -959,12 +971,7 @@ def _build_custom_layer_control_js(
                 hdr2.textContent = 'Candidate Stop Inspector';
                 hdr2.style.cssText =
                     'font-weight:bold;font-size:12px;margin:6px 0 2px;color:#555;';
-                var note = L.DomUtil.create('div', '', c);
-                note.textContent = 'Dots = candidate stops evaluated per student.';
-                note.style.cssText = 'font-size:10px;color:#888;margin-bottom:1px;';
-                var note2 = L.DomUtil.create('div', '', c);
-                note2.textContent = 'Dark=2pts, Grey=1pt, Light=0pt. Click for details.';
-                note2.style.cssText = 'font-size:10px;color:#888;margin-bottom:4px;';{candidate_rows}
+                {candidate_rows}
                 return c;
             }}
         }});
@@ -973,15 +980,48 @@ def _build_custom_layer_control_js(
     """
 
 
-def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
+def _build_stats_html(all_stats, crossings_dict, occupancies_dict,
+                      solutions_dict=None, G=None, constraints=None):
+    now    = datetime.datetime.now()
+    hour12 = now.hour % 12 or 12
+    ampm   = "am" if now.hour < 12 else "pm"
+    ts     = now.strftime("%d/%m/%y") + f" {hour12:02d}:{now.strftime('%M')} {ampm}"
+
     blocks = ""
+    _build_stats_html._mode_tables = ""   # accumulator for side-by-side mode tables
     for mk in ("A", "B", "C"):
-        s = all_stats[mk]
-        cx = len(crossings_dict.get(mk, []))
+        mc = _ROUTE_COLORS[mk][0]
+
+        # Mode was skipped — show a dimmed placeholder
+        if mk not in all_stats or all_stats[mk] is None:
+            blocks += f"""
+        <div style="margin-bottom:8px; padding-bottom:8px;
+                    border-bottom:1px solid #e0e0e0;">
+          <div style="font-weight:bold; color:#aaa; margin-bottom:3px;">
+            {mk}: {_MODE_NAMES[mk]}
+          </div>
+          <div style="font-size:11px; color:#bbb; font-style:italic;">skipped (debug.run_mode_{mk.lower()}=false)</div>
+        </div>"""
+            continue
+        s   = all_stats[mk]
+        cx  = len(crossings_dict.get(mk, []))
         occ = occupancies_dict.get(mk, [])
-        avg_occ = (sum(occ) / len(occ)) if occ else 0
         cx_color = "#c0392b" if cx > 0 else "#27ae60"
         mc = _ROUTE_COLORS[mk][0]
+
+        # Avg occupancy as % of bus capacity
+        sol = (solutions_dict or {}).get(mk)
+        active_routes = [r for r in sol.routes if r.get_student_count() > 0] if sol else []
+        cap = active_routes[0].bus.capacity if active_routes else None
+        if occ and cap:
+            avg_occ_str = f"{(sum(occ) / len(occ) / cap * 100):.0f}%"
+        elif occ:
+            avg_occ_str = f"{(sum(occ) / len(occ)):.1f}"
+        else:
+            avg_occ_str = "—"
+
+        sat_by_route = s.get("sat_by_route", {})
+
         blocks += f"""
         <div style="margin-bottom:8px; padding-bottom:8px;
                     border-bottom:1px solid #e0e0e0;">
@@ -1003,7 +1043,7 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
               <td style="padding:1px 4px;">{s['routes']}</td>
               <td style="padding:1px 4px;">{s['total_time']:.0f} min</td>
               <td style="padding:1px 4px;">{s['total_dist']:.1f} km</td>
-              <td style="padding:1px 4px;">{avg_occ:.1f}</td>
+              <td style="padding:1px 4px;">{avg_occ_str}</td>
               <td style="padding:1px 4px;">{s['served']}/{s['total']}</td>
               <td style="padding:1px 4px;">{s.get('satisfied', '—')}/{s['served']}</td>
               <td style="padding:1px 4px; color:{cx_color};">{cx}</td>
@@ -1011,9 +1051,62 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
           </table>
         </div>"""
 
+        # Per-mode mini-table for the side-by-side horizontal layout
+        th = "padding:1px 4px; text-align:right; border-bottom:1px solid #ccc; white-space:nowrap;"
+        th_l = "padding:1px 4px; text-align:left; border-bottom:1px solid #ccc; white-space:nowrap;"
+        td_r = "padding:1px 4px; text-align:right; border-bottom:1px solid #f0f0f0;"
+        td_l = "padding:1px 4px; text-align:left;  border-bottom:1px solid #f0f0f0;"
+        rows_html = ""
+        if sol:
+            for route in sorted(active_routes, key=lambda r: r.route_id):
+                sc    = route.get_student_count()
+                cap_r = route.bus.capacity
+                sat_r = sat_by_route.get(route.route_id, "—")
+                rows_html += f"""
+              <tr>
+                <td style="{td_l}">{route.route_id}</td>
+                <td style="{td_r}">{route.total_distance:.1f}</td>
+                <td style="{td_r}">{route.total_time:.0f}</td>
+                <td style="{td_r}">{sc}/{cap_r}</td>
+                <td style="{td_r}">{sat_r}/{sc}</td>
+              </tr>"""
+        mode_tables_html = getattr(_build_stats_html, '_mode_tables', "")
+        mode_tables_html += f"""
+          <table style="border-collapse:collapse; font-size:10px; white-space:nowrap;
+                        margin-right:10px; vertical-align:top; display:inline-table;">
+            <thead>
+              <tr style="background:#f5f5f5; color:{mc};">
+                <th colspan="5" style="padding:1px 4px; text-align:left;
+                    border-bottom:1px solid #ccc; font-size:10px;">{mk}</th>
+              </tr>
+              <tr style="background:#f5f5f5; color:#555;">
+                <th style="{th_l}">Route</th>
+                <th style="{th}">Dist (km)</th>
+                <th style="{th}">Time (m)</th>
+                <th style="{th}">Occ</th>
+                <th style="{th}">Sat</th>
+              </tr>
+            </thead>
+            <tbody>{rows_html}
+            </tbody>
+          </table>"""
+        _build_stats_html._mode_tables = mode_tables_html
+
+    mode_tables_html = getattr(_build_stats_html, '_mode_tables', "")
+    _build_stats_html._mode_tables = ""   # reset for next call
+
+    # Three mode mini-tables placed side-by-side; single horizontal scrollbar at bottom
+    route_table = f"""
+      <div style="margin-top:6px; padding-top:6px; border-top:1px solid #ddd;">
+        <div style="font-size:11px; font-weight:bold; color:#444; margin-bottom:3px;">Per-Route Details</div>
+        <div style="overflow-x:auto; white-space:nowrap;">
+          {mode_tables_html}
+        </div>
+      </div>"""
+
     return f"""
     <div style="position:fixed; bottom:15px; right:15px; width:430px;
-                max-height:calc(100vh - 80px); overflow-y:auto;
+                max-height:260px; overflow-y:auto;
                 background:white; border:2px solid #555; z-index:9999;
                 padding:12px 14px; border-radius:6px; font-size:12px;
                 font-family:Arial,sans-serif; box-shadow:2px 2px 8px rgba(0,0,0,.25);">
@@ -1022,11 +1115,13 @@ def _build_stats_html(all_stats, crossings_dict, occupancies_dict):
         Three-Mode Routing Comparison
       </div>
       {blocks}
-      <div style="font-size:10px; color:#888; margin-top:4px;">
+      {route_table}
+      <div style="font-size:10px; color:#888; margin-top:6px;">
         Toggle layers via top-right control.<br>
         <span style="color:#e74c3c;">&#x2015;&#x2015;</span> Dangerous roads
         &nbsp;&nbsp;
-        <span style="color:#7f8c8d;">&#x2508;&#x2508;</span> Unclassified roads
+        <span style="color:#7f8c8d;">&#x2508;&#x2508;</span> Unclassified roads<br>
+        Generated: {ts}
       </div>
     </div>
     """
@@ -1087,7 +1182,8 @@ def _compute_walk_stats(sol, G, stage_walk):
 
 
 def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
-                   sol_a, sol_b, sol_c, G_unc, iters):
+                   sol_a, sol_b, sol_c, G_unc, iters, total_wall=None,
+                   step_times=None, mode_wall_times=None):
     """Assemble the full metrics dict that will be written to metrics.json."""
     mode_map = {
         "constrained":   ("A", sol_a),
@@ -1096,6 +1192,9 @@ def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
     }
     modes_out = {}
     for mode_key, (mk, sol) in mode_map.items():
+        if sol is None or mk not in all_stats:
+            modes_out[mode_key] = {"skipped": True}
+            continue
         s   = all_stats[mk]
         cx  = len(crossings_dict.get(mk, []))
         n_routes = s["routes"]
@@ -1148,28 +1247,68 @@ def _build_metrics(meta, stage_walk, all_stats, crossings_dict,
                         "walk_distance_m": round(walk_dist, 1),
                     })
         
-        modes_out[mode_key] = {
+        mode_entry = {
             "routes_created":       n_routes,
             "students_served":      s["served"],
             "students_unserved":    s["total"] - s["served"],
             "total_route_time_min": round(s["total_time"], 2),
             "total_route_dist_km":  round(s["total_dist"],  2),
             "avg_route_time_min":   round(s["total_time"] / n_routes, 2) if n_routes else 0,
-            "runtime_seconds":      round(s["runtime"],     2),
+            "alns_runtime_seconds": round(s["runtime"],     2),
+            "mode_wall_time_seconds": s.get("mode_wall_time"),
             "unsafe_crossings":     cx,
             "walk_stats":           walk,
             "students":             students_list,
         }
+        # Attach fleet-search diagnostics if present
+        if s.get("fleet_search_log"):
+            mode_entry["fleet_search"] = {
+                "buses_used":    s.get("buses_used"),
+                "summary":       s.get("fleet_search_summary"),
+                "search_log":    s["fleet_search_log"],
+            }
+        modes_out[mode_key] = mode_entry
 
-    # cross-mode comparisons
-    t_con  = modes_out["constrained"]["total_route_time_min"]
-    t_unc  = modes_out["unconstrained"]["total_route_time_min"]
-    t_d2d  = modes_out["door_to_door"]["total_route_time_min"]
-    cx_con = modes_out["constrained"]["unsafe_crossings"]
-    cx_unc = modes_out["unconstrained"]["unsafe_crossings"]
+    # cross-mode comparisons (guard against skipped modes)
+    def _mget(mode_key, field, default=None):
+        entry = modes_out.get(mode_key, {})
+        return entry.get(field, default) if not entry.get("skipped") else default
+
+    t_con  = _mget("constrained",   "total_route_time_min", 0)
+    t_unc  = _mget("unconstrained", "total_route_time_min", 0)
+    t_d2d  = _mget("door_to_door",  "total_route_time_min", 0)
+    cx_con = _mget("constrained",   "unsafe_crossings", 0)
+    cx_unc = _mget("unconstrained", "unsafe_crossings", 0)
+
+    # Build per-mode debug breakdown
+    _dbg_modes = {}
+    for _mk, _sk, _sol in [("A", "constrained", sol_a), ("B", "unconstrained", sol_b), ("C", "door_to_door", sol_c)]:
+        _s = all_stats.get(_mk)
+        _wt = (mode_wall_times or {}).get(_mk)
+        if _s and _wt is not None:
+            _alns_t = round(_s.get("runtime", 0), 2)
+            _dbg_modes[_mk] = {
+                "mode_wall_time_s":        _wt,
+                "alns_solve_s":            _alns_t,
+                "setup_and_overhead_s":    round(_wt - _alns_t, 2),
+                "alns_iterations":         _s.get("iterations"),
+                "n_candidates_per_student": round(
+                    sum(len(v) for v in (getattr(_alns, '_student_candidate_cache', None) or {}).values())
+                    / max(1, _s.get("total", 1)), 1
+                ) if _sol else None,
+            }
+        else:
+            _dbg_modes[_mk] = {"skipped": True}
+
+    _debug_stats = {
+        "step_times": step_times or {},
+        "mode_breakdown": _dbg_modes,
+    }
 
     return {
-        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "generated_at": (lambda n: n.strftime("%d/%m/%y") + f" {n.hour%12 or 12:02d}:{n.strftime('%M')} {'am' if n.hour<12 else 'pm'}")(datetime.datetime.now()),
+        "total_wall_time_seconds": total_wall,
+        "debug_stats": _debug_stats,
         "config": {
             "n_students":       meta.get("n_students"),
             "seed":             meta.get("seed"),
@@ -1225,8 +1364,19 @@ def run(input_path=None, output_path=None, iterations=None):
     iterations : int | None
         Override ALNS iteration count from input.json.
     """
-    meta = _load_meta(input_path)
-    iters  = iterations or meta.get("algorithm", {}).get("iterations", 30)
+    import time as _wtime
+    _run_start = _wtime.time()
+
+    meta           = _load_meta(input_path)
+    iters          = iterations or meta.get("algorithm", {}).get("iterations", 30)
+    minimize_buses = meta.get("algorithm", {}).get("minimize_buses", False)
+
+    # ── Debug / partial-run flags ──
+    _dbg       = meta.get("debug", {})
+    run_mode_a = bool(_dbg.get("run_mode_a", True))
+    run_mode_b = bool(_dbg.get("run_mode_b", True))
+    run_mode_c = bool(_dbg.get("run_mode_c", True))
+    _active_modes = [m for m, en in [("A", run_mode_a), ("B", run_mode_b), ("C", run_mode_c)] if en]
 
     # Resolve where to write the map
     if output_path:
@@ -1250,12 +1400,21 @@ def run(input_path=None, output_path=None, iterations=None):
     print(f"  Stages   : {meta['stage_distribution']}")
     print(f"  Walk lim : {stage_walk}")
     print(f"  Iters    : {iters}")
+    _mode_labels = {"A": "Constrained", "B": "Unconstrained", "C": "Door-to-Door"}
+    _skipped = [m for m in ("A", "B", "C") if m not in _active_modes]
+    _mode_wall_times = {}
+    _step_times: dict = {}
+    print(f"  Running  : {', '.join(_mode_labels[m] for m in _active_modes)}")
+    if _skipped:
+        print(f"  Skipping : {', '.join(_mode_labels[m] for m in _skipped)} (debug flags)")
     print()
 
     # ── 1. Generate dataset ──
     print("[1/7] Generating dataset …")
+    _t0 = _wtime.time()
     base_data = _generate_dataset(meta)
     base_data["meta"]["algorithm"]["iterations"] = iters
+    _step_times["generate_dataset_s"] = round(_wtime.time() - _t0, 2)
 
     # Print stage breakdown
     stage_counts = {}
@@ -1265,24 +1424,27 @@ def run(input_path=None, output_path=None, iterations=None):
 
     # ── 2. Constrained graph ──
     print("\n[2/7] Building CONSTRAINED graph …")
+    _t0 = _wtime.time()
     G_con = setup_graph(base_data["meta"], unconstrained=False)
     _prebuild_ball_tree(G_con)
-
-    import copy as _copy
-    G_con_saved = _copy.deepcopy(G_con)
+    _step_times["build_constrained_graph_s"] = round(_wtime.time() - _t0, 2)
 
     # ── 3. Unconstrained graph ──
+    # NOTE: setup_graph() always loads a fresh graph from pickle — G_unc and
+    # G_con are fully independent objects.  No deepcopy of G_con is needed.
     print("[3/7] Building UNCONSTRAINED graph …")
+    _t0 = _wtime.time()
     G_unc = setup_graph(base_data["meta"], unconstrained=True)
-    G_con = G_con_saved
     _eng._BALL_TREE = None
     _eng._BALL_TREE_GRAPH_ID = None
     _eng._BALL_TREE_NODE_IDS = None
+    _step_times["build_unconstrained_graph_s"] = round(_wtime.time() - _t0, 2)
 
     # ── 4. Mode A: Constrained ──
     # Walking BFS uses G_con (safety-restricted edges).
     # Bus driving distances ALWAYS use G_unc (full road network).
     _ride_caps_on = meta.get("constraints", {}).get("enabled", True)
+    _t_a = _wtime.time()
     print("\n" + "-" * 50)
     print("MODE A: Constrained (safety ON, stage walk radii)")
     print("-" * 50)
@@ -1291,54 +1453,77 @@ def run(input_path=None, output_path=None, iterations=None):
         _relax_ride_constraints(data_a)
     _reset_caches()
     _prebuild_ball_tree(G_con)
-    sol_a, stats_a, school_a = run_algorithm(
-        data_a, G_con, iterations=iters, stage_walk_limits=stage_walk,
-        G_drive=G_unc)
+    if minimize_buses:
+        print("  [FleetSearch] minimize_buses=True — searching minimum fleet for Mode A")
+        _, sol_a, stats_a, school_a = find_minimum_fleet(
+            data_a, G_con, iterations=iters, stage_walk_limits=stage_walk, G_drive=G_unc)
+    else:
+        sol_a, stats_a, school_a = run_algorithm(
+            data_a, G_con, iterations=iters, stage_walk_limits=stage_walk, G_drive=G_unc)
     stats_a["label"] = "Mode-A"
     # Snapshot candidate data before caches are cleared for next mode
     cands_a    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
     cand_dist_a = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
+    _mode_wall_times["A"] = round(_wtime.time() - _t_a, 2)
     print(f"  [A] {stats_a['served']}/{stats_a['total']} served | "
           f"routes={stats_a['routes']} | time={stats_a['total_time']:.1f} min | "
           f"{stats_a['runtime']:.1f}s")
 
     # ── 5. Mode B: Unconstrained ──
+    _t_b = _wtime.time()
     print("\n" + "-" * 50)
     print("MODE B: Unconstrained (all safe, same walk radius)")
     print("-" * 50)
     data_b = _make_unconstrained(base_data)
     if not _ride_caps_on:
         _relax_ride_constraints(data_b)
-    _reset_caches()
+    # Keep G_unc matrix — all modes share the same driving graph.
+    # Clear walk caches since walking graph changes from G_con (A) to G_unc (B).
+    _reset_caches(keep_matrix=True)
+    import gc as _gc; _gc.collect()   # reclaim freed walk-graph + candidate memory
     _prebuild_ball_tree(G_unc)
-    sol_b, stats_b, school_b = run_algorithm(data_b, G_unc, iterations=iters,
-                                              G_drive=G_unc)
+    if minimize_buses:
+        print("  [FleetSearch] minimize_buses=True — searching minimum fleet for Mode B")
+        _, sol_b, stats_b, school_b = find_minimum_fleet(
+            data_b, G_unc, iterations=iters, G_drive=G_unc)
+    else:
+        sol_b, stats_b, school_b = run_algorithm(data_b, G_unc, iterations=iters, G_drive=G_unc)
     stats_b["label"] = "Mode-B"
     cands_b    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
     cand_dist_b = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
+    _mode_wall_times["B"] = round(_wtime.time() - _t_b, 2)
     print(f"  [B] {stats_b['served']}/{stats_b['total']} served | "
           f"routes={stats_b['routes']} | time={stats_b['total_time']:.1f} min | "
           f"{stats_b['runtime']:.1f}s")
 
     # ── 6. Mode C: Door-to-Door ──
+    _t_c = _wtime.time()
     print("\n" + "-" * 50)
     print("MODE C: Door-to-Door (walk=0, bus visits every home)")
     print("-" * 50)
     data_c = _make_door_to_door(base_data)
     if not _ride_caps_on:
         _relax_ride_constraints(data_c)
-    _reset_caches()
+    # Keep G_unc matrix AND walk caches — Mode C uses the same G_unc as Mode B.
+    # Only ALNS candidate caches are cleared (different walk_radius=0 config).
+    _reset_caches(keep_matrix=True, keep_walk=True)
     _prebuild_ball_tree(G_unc)
-    sol_c, stats_c, school_c = run_algorithm(data_c, G_unc, iterations=iters,
-                                              G_drive=G_unc)
+    if minimize_buses:
+        print("  [FleetSearch] minimize_buses=True — searching minimum fleet for Mode C")
+        _, sol_c, stats_c, school_c = find_minimum_fleet(
+            data_c, G_unc, iterations=iters, G_drive=G_unc)
+    else:
+        sol_c, stats_c, school_c = run_algorithm(data_c, G_unc, iterations=iters, G_drive=G_unc)
     stats_c["label"] = "Mode-C"
     cands_c    = {sid: list(v) for sid, v in _alns._student_candidate_cache.items()}
     cand_dist_c = {sid: dict(v) for sid, v in _alns._student_candidate_dist.items()}
+    _mode_wall_times["C"] = round(_wtime.time() - _t_c, 2)
     print(f"  [C] {stats_c['served']}/{stats_c['total']} served | "
           f"routes={stats_c['routes']} | time={stats_c['total_time']:.1f} min | "
           f"{stats_c['runtime']:.1f}s")
 
     # ── 7. Build map ──
+    _t0 = _wtime.time()
     print("\n" + "-" * 50)
     print("BUILDING COMPARISON MAP")
     print("-" * 50)
@@ -1380,11 +1565,11 @@ def run(input_path=None, output_path=None, iterations=None):
     # Bus routes are always rendered with G_unc (the bus drives on all roads)
     fgs = {}          # mk -> (fg_routes, fg_walks)
     fgs_unserved = {}  # mk -> fg_unserved
-    for mk, sol, stats in [
+    for mk, sol, stats in [(mk, sol, st) for mk, sol, st in [
         ("A", sol_a, stats_a),
         ("B", sol_b, stats_b),
         ("C", sol_c, stats_c),
-    ]:
+    ] if sol is not None]:
         print(f"  Drawing Mode {mk} …")
         fg_r, fg_w, cx, occ = _add_route_layer(m, G_unc, sol, mk, G_con,
                                                  constraints=meta.get("constraints"))
@@ -1392,20 +1577,28 @@ def run(input_path=None, output_path=None, iterations=None):
         crossings_dict[mk] = cx
         occupancies_dict[mk] = occ
         all_stats[mk] = stats
-        all_stats[mk]["satisfied"] = _count_satisfied(sol, G_unc, meta.get("constraints", {}))
+        _sat_by_route = _count_satisfied_per_route(sol, G_unc, meta.get("constraints", {}))
+        all_stats[mk]["satisfied"]     = sum(_sat_by_route.values())
+        all_stats[mk]["sat_by_route"]  = _sat_by_route
         fgs_unserved[mk] = _add_unserved_layer(m, sol, mk)
 
     # Candidate stop inspector layers (one per mode, hidden by default)
-    cand_data = {
-        "A": (sol_a, cands_a,  cand_dist_a, G_con),
-        "B": (sol_b, cands_b,  cand_dist_b, G_unc),
-        "C": (sol_c, cands_c,  cand_dist_c, G_unc),
-    }
+    cand_data = {mk: cd for mk, cd in {
+        "A": (sol_a, cands_a,  cand_dist_a, G_con) if sol_a else None,
+        "B": (sol_b, cands_b,  cand_dist_b, G_unc) if sol_b else None,
+        "C": (sol_c, cands_c,  cand_dist_c, G_unc) if sol_c else None,
+    }.items() if cd is not None}
     fgs_cands = {}
     for mk, (sol, cds, cdst, G_mk) in cand_data.items():
         fgs_cands[mk] = _add_candidate_layer(m, G_mk, mk, sol, cds, cdst)
 
     fg_crossings = _add_crossing_markers(m, crossings_dict)
+
+    # Fill in empty FeatureGroups for any skipped modes so the layer control doesn't crash
+    for _mk in ("A", "B", "C"):
+        if _mk not in fgs:
+            _emp = FeatureGroup(name=f"Mode {_mk} (skipped)", show=False)
+            fgs[_mk] = (_emp, _emp)
 
     # Custom grouped layer control (title + 3 mode checkboxes, no radio buttons)
     map_var = f"map_{m._id}"
@@ -1423,16 +1616,24 @@ def run(input_path=None, output_path=None, iterations=None):
     m.get_root().script.add_child(folium.Element(ctrl_js))
 
     m.get_root().html.add_child(folium.Element(
-        _build_stats_html(all_stats, crossings_dict, occupancies_dict)))
+        _build_stats_html(all_stats, crossings_dict, occupancies_dict,
+                          solutions_dict={"A": sol_a, "B": sol_b, "C": sol_c},
+                          G=G_unc,
+                          constraints=meta.get("constraints", {}))))
 
     m.save(output)
     fsize_kb = os.path.getsize(output) / 1024
+    _step_times["build_map_s"] = round(_wtime.time() - _t0, 2)
     print(f"\n  Map saved: {output}  ({fsize_kb:.0f} KB)")
 
     # ── Metrics JSON ──
+    _total_wall = round(_wtime.time() - _run_start, 2)
     metrics = _build_metrics(
         meta, stage_walk, all_stats, crossings_dict,
         sol_a, sol_b, sol_c, G_unc, iters,
+        total_wall=_total_wall,
+        step_times=_step_times,
+        mode_wall_times=_mode_wall_times,
     )
     metrics_path = os.path.join(os.path.dirname(output), "output.json")
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -1443,14 +1644,20 @@ def run(input_path=None, output_path=None, iterations=None):
     print("\n" + "=" * 60)
     print("  COMPARISON SUMMARY")
     print("=" * 60)
-    hdr = f"{'Mode':<30} {'Routes':>6} {'Time':>8} {'Dist':>8} {'Served':>8} {'Crossings':>10}"
+    hdr = f"{'Mode':<30} {'Routes':>6} {'Time':>8} {'Dist':>8} {'Served':>8} {'Crossings':>10} {'Wall(s)':>8}"
     print(hdr)
     print("-" * len(hdr))
-    for mk in ("A", "B", "C"):
-        s = all_stats[mk]
+    for mk in _active_modes:
+        s  = all_stats[mk]
         cx = len(crossings_dict.get(mk, []))
+        wt = _mode_wall_times.get(mk, 0)
         print(f"{_MODE_NAMES[mk]:<30} {s['routes']:>6} {s['total_time']:>8.1f} "
-              f"{s['total_dist']:>8.1f} {s['served']}/{s['total']:>5} {cx:>10}")
+              f"{s['total_dist']:>8.1f} {s['served']}/{s['total']:>5} {cx:>10} {wt:>8.1f}")
+    if _skipped:
+        for mk in _skipped:
+            print(f"{_MODE_NAMES[mk]:<30}{'— SKIPPED —':>55}")
+    print(f"\nWall-clock per mode:  {', '.join(f'{m}={_mode_wall_times[m]:.1f}s' for m in _active_modes)}")
+    print(f"Total wall-clock:     {_total_wall:.1f}s")
     print(f"\nStage distribution used: { {k:v for k,v in meta['stage_distribution'].items() if k != '_comment'} }")
     print(f"Walk limits used: {stage_walk}")
     print(f"\nOpen '{output}' in a browser to explore.")

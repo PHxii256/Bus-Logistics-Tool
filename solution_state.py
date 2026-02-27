@@ -37,7 +37,10 @@ class ServiceSolution:
             else:
                 total_walk_penalty += penalty
         
-        return (served_count * 10000) - total_time - total_walk_penalty
+        # Penalise each active bus — strong enough to prefer fewer buses
+        # but weaker than serving one more student (10 000 pts).
+        active_routes = sum(1 for r in self.routes if r.get_student_count() > 0)
+        return (served_count * 10000) - (active_routes * 5000) - total_time - total_walk_penalty
         
     def clone(self):
         """

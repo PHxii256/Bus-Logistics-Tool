@@ -43,7 +43,7 @@
   },
 
   "algorithm": {
-    "iterations": 60,
+    "iterations": 200,
     "time_budget_seconds": 60,
     "_comment_budget": "Each mode runs until time_budget_seconds of wall-clock time is used (or iterations is hit first, whichever comes first). Ensures all three modes get equal search effort.",
     "max_candidates_per_student": 8,
@@ -59,12 +59,5 @@
     "max_km": 5.0
   },
 
-  "output": "comparison_map.html",
-
-  "debug": {
-    "_comment": "Set any run_mode_* to false to skip that mode — useful for faster iteration when only one mode needs re-running.",
-    "run_mode_a": true,
-    "run_mode_b": true,
-    "run_mode_c": true
-  }
+  "output": "comparison_map.html"
 }

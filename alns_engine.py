@@ -77,6 +77,26 @@ def worst_cost_removal(solution, n):
         _remove_student_from_solution(solution, student)
     return removed
 
+def route_merge_removal(solution, n):
+    """Empties the least-populated active route so ALNS must consolidate
+    its students into the remaining routes.  Drives fleet reduction without
+    changing the number of Route objects in the solution."""
+    active = [r for r in solution.routes
+              if r.get_student_count() > 0]
+    if len(active) < 2:
+        return []
+    # Target the route with the fewest students (easiest to absorb)
+    active.sort(key=lambda r: r.get_student_count())
+    target = active[0]
+    removed = []
+    for stop in list(target.stops):
+        if stop.stop_type == 'school':
+            continue
+        for student in list(stop.students):
+            _remove_student_from_solution(solution, student)
+            removed.append(student)
+    return removed
+
 def _remove_student_from_solution(solution, student):
     """Helper to safely decouple student from stop and route."""
     stop = student.assigned_stop
@@ -343,10 +363,13 @@ def _apply_insertion(solution, student, result):
 class ALNSEngine:
     def __init__(self, initial_solution, iterations=100, temp=1000, cooling=0.98,
                  time_budget_seconds=None, max_candidates_per_student=None):
-        # Configure module-level candidate settings and clear stale cache
-        global _alns_candidate_cfg, _student_candidate_cache, _student_candidate_dist
-        _student_candidate_cache.clear()  # invalidate cache from any previous run
-        _student_candidate_dist.clear()
+        # Configure module-level candidate settings.
+        # NOTE: do NOT clear _student_candidate_cache here — the cache is
+        # keyed by student-id and stays valid across fleet-search iterations
+        # (same students, same graph, same walk radii).  Clearing is handled
+        # by _reset_caches() in run_comparison.py between MODES, not between
+        # fleet-search k values.
+        global _alns_candidate_cfg
         _alns_candidate_cfg = {}
         if max_candidates_per_student is not None:
             _alns_candidate_cfg["max_candidates_per_student"] = max_candidates_per_student
@@ -358,7 +381,7 @@ class ALNSEngine:
         self.cooling = cooling
         self.time_budget_seconds = time_budget_seconds  # wall-clock budget (None = use iterations only)
         
-        self.destroy_ops = [random_removal, worst_cost_removal]
+        self.destroy_ops = [random_removal, worst_cost_removal, route_merge_removal]
         self.repair_ops = [greedy_repair, regret_repair]
         
         # Weights for operator selection

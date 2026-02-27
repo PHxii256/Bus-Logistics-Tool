@@ -43,7 +43,7 @@
   },
 
   "algorithm": {
-    "iterations": 60,
+    "iterations": 100,
     "time_budget_seconds": 60,
     "_comment_budget": "Each mode runs until time_budget_seconds of wall-clock time is used (or iterations is hit first, whichever comes first). Ensures all three modes get equal search effort.",
     "max_candidates_per_student": 8,

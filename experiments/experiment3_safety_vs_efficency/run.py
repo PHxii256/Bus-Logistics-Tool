@@ -17,6 +17,10 @@ Usage
     
     or just run:
     python experiments/experiment3_safety_vs_efficency/run.py --input experiments\experiment3_safety_vs_efficency\input.json
+    
+    Linux: 
+    python experiments/experiment3_safety_vs_efficency/run.py --input experiments/experiment3_safety_vs_efficency/input.json
+
 
 Output structure
 ----------------

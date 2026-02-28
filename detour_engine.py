@@ -8,7 +8,7 @@ This module provides the core algorithms for:
 4. Managing temporary and permanent student detour requests
 5. Enforcing safety and time constraints
 """
-
+import requests
 import networkx as nx
 import osmnx as ox
 import math
@@ -306,6 +306,8 @@ def find_shortest_path_with_turns(graph, source, target, weight='travel_time', i
     This prevents 180-degree turns and applies minor penalties for 90-degree turns.
     Uses a predecessor map instead of storing full paths on the heap for speed.
     """
+    return None, float('inf')
+
     if source == target:
         return [source], 0.0
 
@@ -1834,3 +1836,58 @@ def process_detour_request(student, existing_routes, graph, detour_type='tempora
     
     message = f"Detour accepted: {student.id} -> Route {route.route_id}, Stop {new_stop.node_id}, Cost +{delta_time:.2f} min"
     return True, route, message
+
+
+# for OSRM integration: Precompute the full distance matrix for all nodes in the graph
+
+def precalculate_distance_matrix_osrm(G, nodes_list):
+    """
+    Replaces the memory-crashing Python A* matrix calculation.
+    Queries a local OSRM Docker container to get all distances instantly.
+    """
+    print(f"Asking local OSRM to calculate matrix for {len(nodes_list)} nodes...")
+    
+    # 1. Map node IDs to their Longitude/Latitude
+    # OSRM expects the format: lon,lat
+    coords_str_list = []
+    for node in nodes_list:
+        lat = G.nodes[node]['y']
+        lon = G.nodes[node]['x']
+        coords_str_list.append(f"{lon},{lat}")
+        
+    coords_string = ";".join(coords_str_list)
+    
+    # 2. Make the HTTP request to the local OSRM Docker container
+    # We ask for both 'duration' and 'distance' annotations
+    url = f"http://localhost:5000/table/v1/driving/{coords_string}?annotations=duration,distance"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"OSRM Error: Is the Docker container running? {e}")
+        return
+        
+    durations = data.get('durations', [])
+    distances = data.get('distances', [])
+    
+    # 3. Save the results into the exact cache format the ALNS engine uses
+    for i, origin_node in enumerate(nodes_list):
+        for j, dest_node in enumerate(nodes_list):
+            
+            # --- HANDLE DURATIONS ---
+            if durations[i][j] is not None:
+                # Convert OSRM seconds to minutes
+                _MATRIX_CACHE[(origin_node, dest_node)] = durations[i][j] / 60.0
+            else:
+                # CRITICAL FIX: Prevent A* Death Spiral by caching infinity
+                _MATRIX_CACHE[(origin_node, dest_node)] = float('inf')
+                
+            # --- HANDLE DISTANCES ---
+            if distances[i][j] is not None:
+                _MATRIX_CACHE_LENGTH[(origin_node, dest_node)] = distances[i][j]
+            else:
+                _MATRIX_CACHE_LENGTH[(origin_node, dest_node)] = float('inf')
+                
+    print("OSRM Matrix calculation complete! Cache populated.")

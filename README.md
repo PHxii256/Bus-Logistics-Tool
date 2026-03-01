@@ -1,21 +1,32 @@
-Download the Egypt Map:
-    Bash
+>[!NOTE]
+> You need Docker for this. If you are on Windows, it's advised to use WSL.
 
-    wget http://download.geofabrik.de/africa/egypt-latest.osm.pbf
+### Create a Folder and Download Egypt's map:
 
-    Extract the Map (Compiles the road network):
-    Bash
+```bash
+wget http://download.geofabrik.de/africa/egypt-latest.osm.pbf
+```
 
-    docker run -t -v "${PWD}:/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/egypt-latest.osm.pbf
+### Extract the map (builds the road network):
 
-    Contract the Graph (Optimizes it for lightning-fast math):
-    Bash
+```bash
+docker run -t -v "${PWD}:/data" osrm/osrm-backend \
+    osrm-extract -p /opt/car.lua /data/egypt-latest.osm.pbf
+```
 
-    docker run -t -v "${PWD}:/data" osrm/osrm-backend osrm-contract /data/egypt-latest.osrm
+### Contract the graph (optimizes routing performance):
 
-    Start the Server:
-    Bash
+```bash
+docker run -t -v "${PWD}:/data" osrm/osrm-backend \
+    osrm-contract /data/egypt-latest.osrm
+```
 
-    docker run -d -p 5000:5000 -v "${PWD}:/data" osrm/osrm-backend osrm-routed /data/egypt-latest.osrm
+### Start the OSRM server:
 
-Boom. You now have an enterprise-grade routing engine running on localhost:5000.
+```bash
+docker run -d -p 5000:5000 -v "${PWD}:/data" osrm/osrm-backend \
+    osrm-routed /data/egypt-latest.osrm
+```
+
+Done. The routing engine is now available at `http://localhost:5000`.
+```

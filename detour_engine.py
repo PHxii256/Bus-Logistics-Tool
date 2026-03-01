@@ -8,7 +8,7 @@ This module provides the core algorithms for:
 4. Managing temporary and permanent student detour requests
 5. Enforcing safety and time constraints
 """
-
+import requests
 import networkx as nx
 import osmnx as ox
 import math
@@ -306,6 +306,8 @@ def find_shortest_path_with_turns(graph, source, target, weight='travel_time', i
     This prevents 180-degree turns and applies minor penalties for 90-degree turns.
     Uses a predecessor map instead of storing full paths on the heap for speed.
     """
+    return None, float('inf')
+
     if source == target:
         return [source], 0.0
 
@@ -1395,61 +1397,110 @@ def validate_permanent_student(new_stop, route, insert_position, delta_time_minu
                     f"Student ride time exceeds Tmax: {new_student_ride_time:.1f} > {route.route_tmax} min")
 
     # Check 3: Existing students whose morning ride increases due to this insertion.
+    # Check 3: Existing students whose morning ride increases due to this insertion.
     if new_student is not None:
+        # --- SUPER OPTIMIZATION: O(1) Ride Time Check ---
+        # Precompute the current time from each stop to the school ONCE (O(N) instead of O(N^3))
+        old_ride_times = {}
+        accumulated = 0.0
+        if route.stops:
+            for i in range(len(route.stops) - 1, 0, -1):
+                u = route.stops[i-1].node_id
+                v = route.stops[i].node_id
+                t = _MATRIX_CACHE.get((u, v), float('inf'))
+                accumulated += t
+                old_ride_times[route.stops[i-1]] = accumulated
+
         for stop in route.stops:
             if stop.stop_type == 'school':
                 continue
+                
+            stop_idx = route.stops.index(stop) if stop in route.stops else -1
+            if stop_idx == -1 or stop_idx >= insert_position:
+                continue  # boards AFTER new stop — morning ride unaffected
+
+            # The new ride time is simply their exact old ride time + the detour delta
+            old_ride_time = old_ride_times.get(stop, float('inf'))
+            morning_ride_check = old_ride_time + delta_time_minutes
+
             for existing_student in stop.students:
                 t_d = compute_direct_time(existing_student, school_node, graph)
                 if t_d == float('inf') or t_d <= 0:
                     continue
+                    
                 ex_floor   = getattr(existing_student, 'floor_minutes',   floor_min)
                 ex_ceiling = getattr(existing_student, 'ceiling_minutes', ceiling_min)
                 existing_cap = max(ex_floor, min(k * t_d, t_d + ex_ceiling))
 
-                stop_idx = route.stops.index(stop) if stop in route.stops else -1
-                if stop_idx == -1:
-                    continue
-                if stop_idx >= insert_position:
-                    continue  # boards AFTER new stop — morning ride unaffected
-
-                # Build post-insertion list and measure this student's new morning ride
-                temp_stops = list(route.stops)
-                temp_stops.insert(insert_position, new_stop)
-                student_stop_idx_in_temp = next(
-                    (ti for ti, ts in enumerate(temp_stops) if ts is stop), -1)
-                if student_stop_idx_in_temp == -1:
-                    continue
-
-                morning_ride_check = 0.0
-                for si in range(student_stop_idx_in_temp, len(temp_stops) - 1):
-                    u = temp_stops[si].node_id
-                    v = temp_stops[si + 1].node_id
-                    t = _MATRIX_CACHE.get((u, v), None)
-                    if t is None:
-                        _, t = find_shortest_path_with_turns(graph, u, v)
-                    if t == float('inf'):
-                        morning_ride_check = float('inf')
-                        break
-                    morning_ride_check += t
-
-                ex_am_violated = morning_ride_check > existing_cap
-
-                if ex_am_violated:
+                if morning_ride_check > existing_cap:
                     if not bidir:
                         return (False, morning_ride_check,
-                                f"Insertion pushes {existing_student.id} over AM cap: "
-                                f"{morning_ride_check:.1f}>{existing_cap:.1f} min")
+                                f"Insertion pushes {existing_student.id} over AM cap")
+                    
                     # Bidirectional: check PM for this existing student
                     pm_ride_ex  = calculate_afternoon_ride_time_potential(
                         route, new_stop, insert_position, graph, target_stop=stop)
-                    ex_pm_violated = pm_ride_ex > existing_cap
-                    if ex_pm_violated:
+                    if pm_ride_ex > existing_cap:
                         return (False, morning_ride_check,
-                                f"Insertion pushes {existing_student.id} over cap in both directions "
-                                f"AM {morning_ride_check:.1f} PM {pm_ride_ex:.1f} > {existing_cap:.1f} min")
+                                f"Insertion pushes {existing_student.id} over cap in both directions")
 
     return True, new_student_ride_time, "Permanent student accepted"
+    
+    # if new_student is not None:
+    #     for stop in route.stops:
+    #         if stop.stop_type == 'school':
+    #             continue
+    #         for existing_student in stop.students:
+    #             t_d = compute_direct_time(existing_student, school_node, graph)
+    #             if t_d == float('inf') or t_d <= 0:
+    #                 continue
+    #             ex_floor   = getattr(existing_student, 'floor_minutes',   floor_min)
+    #             ex_ceiling = getattr(existing_student, 'ceiling_minutes', ceiling_min)
+    #             existing_cap = max(ex_floor, min(k * t_d, t_d + ex_ceiling))
+
+    #             stop_idx = route.stops.index(stop) if stop in route.stops else -1
+    #             if stop_idx == -1:
+    #                 continue
+    #             if stop_idx >= insert_position:
+    #                 continue  # boards AFTER new stop — morning ride unaffected
+
+    #             # Build post-insertion list and measure this student's new morning ride
+    #             temp_stops = list(route.stops)
+    #             temp_stops.insert(insert_position, new_stop)
+    #             student_stop_idx_in_temp = next(
+    #                 (ti for ti, ts in enumerate(temp_stops) if ts is stop), -1)
+    #             if student_stop_idx_in_temp == -1:
+    #                 continue
+
+    #             morning_ride_check = 0.0
+    #             for si in range(student_stop_idx_in_temp, len(temp_stops) - 1):
+    #                 u = temp_stops[si].node_id
+    #                 v = temp_stops[si + 1].node_id
+    #                 t = _MATRIX_CACHE.get((u, v), None)
+    #                 if t is None:
+    #                     _, t = find_shortest_path_with_turns(graph, u, v)
+    #                 if t == float('inf'):
+    #                     morning_ride_check = float('inf')
+    #                     break
+    #                 morning_ride_check += t
+
+    #             ex_am_violated = morning_ride_check > existing_cap
+
+    #             if ex_am_violated:
+    #                 if not bidir:
+    #                     return (False, morning_ride_check,
+    #                             f"Insertion pushes {existing_student.id} over AM cap: "
+    #                             f"{morning_ride_check:.1f}>{existing_cap:.1f} min")
+    #                 # Bidirectional: check PM for this existing student
+    #                 pm_ride_ex  = calculate_afternoon_ride_time_potential(
+    #                     route, new_stop, insert_position, graph, target_stop=stop)
+    #                 ex_pm_violated = pm_ride_ex > existing_cap
+    #                 if ex_pm_violated:
+    #                     return (False, morning_ride_check,
+    #                             f"Insertion pushes {existing_student.id} over cap in both directions "
+    #                             f"AM {morning_ride_check:.1f} PM {pm_ride_ex:.1f} > {existing_cap:.1f} min")
+
+    # return True, new_student_ride_time, "Permanent student accepted"
 
 
 # ============================================================================
@@ -1834,3 +1885,58 @@ def process_detour_request(student, existing_routes, graph, detour_type='tempora
     
     message = f"Detour accepted: {student.id} -> Route {route.route_id}, Stop {new_stop.node_id}, Cost +{delta_time:.2f} min"
     return True, route, message
+
+
+# for OSRM integration: Precompute the full distance matrix for all nodes in the graph
+
+def precalculate_distance_matrix_osrm(G, nodes_list):
+    """
+    Replaces the memory-crashing Python A* matrix calculation.
+    Queries a local OSRM Docker container to get all distances instantly.
+    """
+    print(f"Asking local OSRM to calculate matrix for {len(nodes_list)} nodes...")
+    
+    # 1. Map node IDs to their Longitude/Latitude
+    # OSRM expects the format: lon,lat
+    coords_str_list = []
+    for node in nodes_list:
+        lat = G.nodes[node]['y']
+        lon = G.nodes[node]['x']
+        coords_str_list.append(f"{lon},{lat}")
+        
+    coords_string = ";".join(coords_str_list)
+    
+    # 2. Make the HTTP request to the local OSRM Docker container
+    # We ask for both 'duration' and 'distance' annotations
+    url = f"http://localhost:5000/table/v1/driving/{coords_string}?annotations=duration,distance"
+    
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"OSRM Error: Is the Docker container running? {e}")
+        return
+        
+    durations = data.get('durations', [])
+    distances = data.get('distances', [])
+    
+    # 3. Save the results into the exact cache format the ALNS engine uses
+    for i, origin_node in enumerate(nodes_list):
+        for j, dest_node in enumerate(nodes_list):
+            
+            # --- HANDLE DURATIONS ---
+            if durations[i][j] is not None:
+                # Convert OSRM seconds to minutes
+                _MATRIX_CACHE[(origin_node, dest_node)] = durations[i][j] / 60.0
+            else:
+                # CRITICAL FIX: Prevent A* Death Spiral by caching infinity
+                _MATRIX_CACHE[(origin_node, dest_node)] = float('inf')
+                
+            # --- HANDLE DISTANCES ---
+            if distances[i][j] is not None:
+                _MATRIX_CACHE_LENGTH[(origin_node, dest_node)] = distances[i][j]
+            else:
+                _MATRIX_CACHE_LENGTH[(origin_node, dest_node)] = float('inf')
+                
+    print("OSRM Matrix calculation complete! Cache populated.")

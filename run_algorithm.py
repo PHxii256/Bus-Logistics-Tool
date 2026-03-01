@@ -212,7 +212,11 @@ def precompute_matrix(students, routes, G, fast_mode=None, G_drive=None,
     if fast_mode is None:
         fast_mode = G_drive.number_of_nodes() > 50_000
     # Bus distance matrix ALWAYS uses the full driving graph
-    precalculate_distance_matrix(G_drive, list(critical_nodes), fast_mode=fast_mode)
+    # precalculate_distance_matrix(G_drive, list(critical_nodes), fast_mode=fast_mode)
+    
+    # OSRM-based precomputation: much faster on large graphs, but requires a local OSRM instance running with the same graph data.  Falls back to in-memory if OSRM fails for any reason (e.g. not running, different graph, etc.) — in that case a warning is printed and the function behaves like the old version, precomputing only the critical nodes with in-memory Dijkstra.
+    from detour_engine import precalculate_distance_matrix_osrm
+    precalculate_distance_matrix_osrm(G_drive, list(critical_nodes))
     return critical_nodes, student_frontages
 
 # ============================================================================

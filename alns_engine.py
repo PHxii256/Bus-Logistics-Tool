@@ -113,7 +113,7 @@ def _remove_student_from_solution(solution, student):
         
     # Update route metrics after removal (lazy matrix lookup)
     fast_time = calculate_route_time_from_matrix(route.stops, solution.graph)
-    route.total_time = fast_time if fast_time is not None else calculate_route_time(route, solution.graph)
+    route.total_time = fast_time if fast_time is not None else float('inf')
     fast_dist = calculate_route_distance_from_matrix(route.stops, solution.graph)
     route.total_distance = fast_dist if fast_dist is not None else calculate_route_distance(route, solution.graph)
 
@@ -122,16 +122,25 @@ def _remove_student_from_solution(solution, student):
 # REPAIR OPERATORS
 # ============================================================================
 
-def greedy_repair(solution):
-    """Inserts all unassigned students using the cheapest available insertion point."""
-    unassigned = [s for s in solution.students if not s.is_served]
-    random.shuffle(unassigned) # Shuffle to provide variation across calls
+# def greedy_repair(solution):
+#     """Inserts all unassigned students using the cheapest available insertion point."""
+#     unassigned = [s for s in solution.students if not s.is_served]
+#     random.shuffle(unassigned) # Shuffle to provide variation across calls
     
-    for student in unassigned:
-        # Reuse existing logic from detour_engine
-        result, _ = cheapest_insertion(student, solution.routes, solution.graph, detour_type='permanent')
-        if result:
-            _apply_insertion(solution, student, result)
+#     for student in unassigned:
+#         # Reuse existing logic from detour_engine
+#         result, _ = cheapest_insertion(student, solution.routes, solution.graph, detour_type='permanent')
+#         if result:
+#             _apply_insertion(solution, student, result)
+
+
+def greedy_repair(solution):
+    """
+    Inserts all unassigned students using the cheapest available insertion point.
+    (Redirected to regret_repair(k=1) to force the use of the OSRM Matrix Cache
+    and prevent the legacy A* Death Spiral).
+    """
+    regret_repair(solution, k=1)
 
 def regret_repair(solution, k=2):
     """Inserts students with the highest 'regret' cost between best and k-best options.
@@ -351,7 +360,7 @@ def _apply_insertion(solution, student, result):
     new_stop.add_student(student)
     # Lazy matrix lookup (computes A* on cache miss)
     fast_time = calculate_route_time_from_matrix(route.stops, solution.graph)
-    route.total_time = fast_time if fast_time is not None else calculate_route_time(route, solution.graph)
+    route.total_time = fast_time if fast_time is not None else float('inf')  
     fast_dist = calculate_route_distance_from_matrix(route.stops, solution.graph)
     route.total_distance = fast_dist if fast_dist is not None else calculate_route_distance(route, solution.graph)
 

@@ -40,3 +40,7 @@ temp*.py
 # Environment variables
 .env
 .env.local
+
+
+osrm/
+*.osrm*
